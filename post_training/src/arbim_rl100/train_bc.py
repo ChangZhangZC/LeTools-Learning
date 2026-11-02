@@ -285,8 +285,11 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
     epochs = int(cfg.training.epochs)
     if epochs < 1 or int(cfg.training.batch_size) < 1:
         raise ValueError("epochs and batch_size must be positive")
-    if int(cfg.training.checkpoint_every) < 1:
-        raise ValueError("checkpoint_every must be positive")
+    if int(cfg.training.checkpoint_every) != 1:
+        raise ValueError(
+            "Batch 02 only supports checkpoint_every=1: latest.ckpt must "
+            "track every completed epoch for exact resume and metrics"
+        )
     if stop_after_epoch is not None and not 1 <= stop_after_epoch <= epochs:
         raise ValueError("--stop-after-epoch must be in [1, training.epochs]")
     epoch_limit = epochs if stop_after_epoch is None else stop_after_epoch
@@ -402,19 +405,16 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
         )
         result["lr"] = float(optimizer.param_groups[0]["lr"])
         print(f"[BC] {result}")
-        if ((epoch + 1) % int(cfg.training.checkpoint_every) == 0
-                or epoch + 1 == epoch_limit or is_best):
-            payload = checkpoint_payload(
-                cfg, model, optimizer, ema_model, lr_scheduler,
-                epoch + 1, global_step, ema=ema,
-                best_val_loss=best_state["val_loss"],
-            )
-            if (epoch + 1) % int(cfg.training.checkpoint_every) == 0 or epoch + 1 == epoch_limit:
-                _save_checkpoint(checkpoint, payload)
-                print(f"[PASS] Saved BC checkpoint: {checkpoint}")
-            if is_best:
-                _save_checkpoint(best_checkpoint, payload)
-                print(f"[PASS] Saved best validation BC checkpoint: {best_checkpoint}")
+        payload = checkpoint_payload(
+            cfg, model, optimizer, ema_model, lr_scheduler,
+            epoch + 1, global_step, ema=ema,
+            best_val_loss=best_state["val_loss"],
+        )
+        _save_checkpoint(checkpoint, payload)
+        print(f"[PASS] Saved BC checkpoint: {checkpoint}")
+        if is_best:
+            _save_checkpoint(best_checkpoint, payload)
+            print(f"[PASS] Saved best validation BC checkpoint: {best_checkpoint}")
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(result, sort_keys=True) + "\n")
     return checkpoint
