@@ -250,8 +250,8 @@ python post_training/tests/smoke/smoke_02_bc_resume_compare.py \
 ## Stable validation and best-checkpoint selection (pending server test)
 
 Development: `gpt/rl100-il-validation` → `feature/rl100-il`
-**after code review**; do not Squash Merge into `arbim/dev`
-until feature acceptance is complete.
+after review, for server validation. **Not yet server-tested.**
+Do not Squash Merge into `arbim/dev` until feature acceptance is complete.
 
 Pooled BC validation uses the original `RL1002D.compute_loss()`,
 without changing the policy or converting validation loss into a task
