@@ -91,6 +91,10 @@ class LeRobotToZarrTest(unittest.TestCase):
         np.testing.assert_array_equal(d["action"][4], d["next_action"][4])
         self.assertEqual(root.attrs["rgb_storage"], "jpeg_bytes_v1")
         self.assertTrue(root.attrs["reward_validated"])
+        self.assertEqual(root.attrs["reward_event"]["episodes"], [
+            {"episode_index": 0, "reward_offset": 1},
+            {"episode_index": 1, "reward_offset": 0},
+        ])
         self.assertEqual(root.attrs["rgb_shapes"]["head_rgb"], [3, 8, 12])
         for key in ("head_rgb", "wrist_left_rgb", "wrist_right_rgb"):
             raw = d[f"{key}_jpeg_data"]
