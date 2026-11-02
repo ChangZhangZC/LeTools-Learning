@@ -29,6 +29,10 @@ def check_imports() -> None:
             "Run: git submodule update --init third_party/rl100"
         )
     sys.path.insert(0, str(RL100_ROOT))
+    sys.path.insert(0, str(REPO_ROOT / "post_training" / "src"))
+    from arbim_rl100.compat import enable_rl100_2d_only_import
+
+    enable_rl100_2d_only_import(RL100_ROOT)
     print(f"Python: {sys.version.split()[0]}")
     print(f"RL-100 root: {RL100_ROOT}")
     for name in MODULES:
