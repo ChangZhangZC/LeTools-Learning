@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_ROOT = REPO_ROOT / "configs" / "train" / "lerobot"
 DEFAULT_ACCELERATE_CONFIG = REPO_ROOT / "configs" / "accelerate" / "accelerate_config.yaml"
 LEROBOT_SRC = REPO_ROOT / "third_party" / "lerobot" / "src"
+RL100_SRC = REPO_ROOT / "third_party" / "rl100" / "RL-100"
 
 POLICY_CHOICES = (
     "act",
@@ -31,6 +32,7 @@ POLICY_CHOICES = (
     "xvla",
     "wall_x",
     "multi_task_dit",
+    "rl100_2d",
 )
 
 
@@ -240,13 +242,17 @@ def _build_command(
     raise ValueError(f"Unsupported launcher: {launcher}")
 
 
-def _build_env() -> dict[str, str]:
+def _build_env(policy: str = "") -> dict[str, str]:
     env = os.environ.copy()
+    prefixes = [str(LEROBOT_SRC)]
+    if policy == "rl100_2d":
+        if not (RL100_SRC / "rl_100" / "policy" / "rl100_2d.py").is_file():
+            raise RuntimeError("RL-100 submodule not initialized: git submodule update --init third_party/rl100")
+        prefixes.insert(0, str(RL100_SRC))
     current = env.get("PYTHONPATH")
     if current:
-        env["PYTHONPATH"] = f"{LEROBOT_SRC}{os.pathsep}{current}"
-    else:
-        env["PYTHONPATH"] = str(LEROBOT_SRC)
+        prefixes.append(current)
+    env["PYTHONPATH"] = os.pathsep.join(prefixes)
     return env
 
 
@@ -383,7 +389,7 @@ def main() -> int:
             config_path.unlink(missing_ok=True)
         return 0
 
-    env = _build_env()
+    env = _build_env(args.policy)
     try:
         process = subprocess.Popen(command, env=env, cwd=str(REPO_ROOT))
         resolved_path = _write_resolved_config_when_available(output_dir, resolved, process)
