@@ -509,7 +509,7 @@ def convert_dataset(
                         })
                     pending = current
                     progress.update(1)
-                assert pending is not None
+            assert pending is not None
             writer.append({
                 "state": pending["state"], "next_state": pending["state"],
                 "action": pending["action"], "next_action": pending["action"],
