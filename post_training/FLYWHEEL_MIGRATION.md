@@ -5,6 +5,25 @@ rollout code has yet been ported. Reference source is
 `ChangZhangZC/kdc_ARBiM@feature/flywheel`. Target is
 `ChangZhangZC/LeTools-Learning@feature/rl100-data`.
 
+## Porting rule: preserve old Flywheel behavior
+
+**Copy/reuse `kdc_ARBiM@feature/flywheel` implementations with the smallest
+possible changes**; do not rewrite the success loop, progress bar, reward
+detector, recorder or data reports merely for style or abstraction.
+Target LeTools changes are confined to its renamed UI entrypoint
+(`kuavo_deploy/eval.py`), existing evaluator's output resolver,
+the agreed `data/` storage location, and interfaces that actually differ
+between LeRobot versions / policies / observations. Preserve existing
+environment-variable controls and normal `auto_test` behavior.
+Do not add a new reward, timeout scheme, scheduler or alternate
+Data Wheel workflow in this migration.
+
+Online PPO and its MuJoCo on-policy step/reset/reward contracts are the
+**last stage (Batch 07–08)** and are explicitly excluded from Flywheel
+porting. Batch 03 simulator evaluation and Batch 06 successful rollout
+collection are separate from Online PPO training.
+
+
 ## Verified behavior in the old implementation
 
 | Source file | Behavior to preserve |
@@ -46,10 +65,11 @@ run identifiers. Other historical branches may have different names.
   old monkey patches.
 - A success count is not a reward-valid count. Persist successes with
   invalid sparse Reward for possible IL, but exclude them from RL export.
-- The current unbounded retry loop risks indefinite operation with a weak
-  policy. Consider an **optional**, explicitly configured max-attempts or
-  timeout safeguard that reports partial progress without changing the
-  default success-target meaning.
+- The original success-target retry loop may run indefinitely if a policy
+  never succeeds. Preserve its semantics in this minimal port: do **not**
+  silently introduce an attempt cap or timeout that changes collection
+  behavior. Keep the existing interactive stop control and document
+  this operational risk.
 
 ## Target separation of persistent data vs run outputs
 
@@ -73,8 +93,9 @@ automatically when integrating this layout.
 
 ## Proposed integration batches and required checks
 
-1. **Deploy UI:** add a Flywheel choice to current `kuavo_deploy/eval.py`;
-   preserve all existing choices, Roban routing, pause/stop/log controls,
+1. **Deploy UI:** copy/adapt the old Flywheel menu and progress functions
+   into current `kuavo_deploy/eval.py` with minimal changes; preserve all
+   existing choices, Roban routing, pause/stop/log controls,
    positive-success-target prompt and live progress indicator.
 2. **Eval runner:** adapt the current `sim_auto_test.py` to success-target
    collection with separate wheel-labelled output; normal `auto_test`
