@@ -33,6 +33,27 @@ The `forward` level additionally constructs an **untrained synthetic** RL1002D (
 
 The synthetic configuration intentionally uses a small U-Net, shared ResNet18 without downloaded pretrained weights, and `action_norm=False` for an isolated smoke test. **It must not be reused as an actual Kuavo training configuration.** Real image dimensions, state/action DOF, image transforms, normalizer and execution timing belong to later batches.
 
+## Incremental dependency installation
+
+Keep extra RL-100 integration dependencies in `post_training/requirements-rl100-extra.txt`, separate from LeTools' base requirements. Run from the repository root after initializing the RL-100 submodule:
+
+```bash
+# Inspect the existing environment before compiling native extensions.
+python -c "import torch; print('torch:', torch.__version__, 'torch CUDA:', torch.version.cuda, 'CUDA available:', torch.cuda.is_available())"
+command -v nvcc && nvcc --version || echo "nvcc not found: build may fall back to CPU extension"
+git submodule status third_party/rl100
+
+# RL-100's bundled, reduced PyTorch3D implementation.
+# --no-build-isolation exposes the already-installed torch during compilation.
+MAX_JOBS=2 python -m pip install --no-build-isolation -r post_training/requirements-rl100-extra.txt
+
+python -c "import pytorch3d, pytorch3d.ops, pytorch3d._C; print('PyTorch3D:', pytorch3d.__file__)"
+python post_training/tests/smoke/smoke_00_rl100_runtime.py --level imports
+python post_training/tests/smoke/smoke_00_rl100_runtime.py --level forward --device cuda:0
+```
+
+This is a genuine, compiled `pytorch3d` package containing the operators bundled by RL-100, **not** a compatibility shim. Do not run RL-100's full requirements installer in the existing LeTools environment. The source was originally validated upstream with Python 3.8 and PyTorch 2.4, not Python 3.12; if compilation fails, capture the full build log and check PyTorch/CUDA/compiler compatibility before changing versions. There is no claim that installation has been validated on the target server.
+
 ## Environment compatibility gate
 
 LeTools' currently pinned LeRobot version is not the same as RL-100's documented environment. In particular, `pytorch3d.ops` is imported unconditionally by `rl100_2d.py`, even for 2D-only use. Do not assume successful git submodule initialization implies import or forward compatibility.
