@@ -31,9 +31,7 @@ From the LeTools-Learning root on the same server:
 
 ```bash
 mkdir -p data/lerobot/icra_task1_10bags data/zarr data/flywheel
-rsync -a --info=progress2 \\
-  /root/bayes-tmp/kuavo_dataset/icra_task1_lerobot_jiayi_10bags/lerobot_v3.0/ \\
-  data/lerobot/icra_task1_10bags/
+rsync -a --info=progress2 /root/bayes-tmp/kuavo_dataset/icra_task1_lerobot_jiayi_10bags/lerobot_v3.0/ data/lerobot/icra_task1_10bags/
 test -f data/lerobot/icra_task1_10bags/meta/info.json
 ```
 
@@ -46,10 +44,7 @@ original is a separate deliberate action. If there is a prior successful
 ## Current conversion example
 
 ```bash
-python post_training/src/arbim_rl100/data/lerobot_to_zarr.py \\
-  --lerobot-root data/lerobot/icra_task1_10bags \\
-  --output data/zarr/icra_task1_10bags.zarr \\
-  --reward-mode terminal_proxy
+python post_training/src/arbim_rl100/data/lerobot_to_zarr.py --lerobot-root data/lerobot/icra_task1_10bags --output data/zarr/icra_task1_10bags.zarr --reward-mode terminal_proxy
 ```
 
 `terminal_proxy` is only for testing the conversion contract. Its Zarr
