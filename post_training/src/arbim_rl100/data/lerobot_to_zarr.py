@@ -282,6 +282,13 @@ def convert_dataset(
                 else "terminal_proxy_not_success_label"
             ),
             "reward_validated": reward_mode == "recorded_sparse",
+            "reward_event": {
+                "source": "external_verified_episode_json",
+                "episodes": [
+                    {"episode_index": ep, "reward_offset": reward_offsets[ep]}
+                    for ep, _, _ in episodes
+                ],
+            } if reward_mode == "recorded_sparse" else None,
             "return_gamma": gamma,
             "source_manifest": [{
                 "kind": "lerobot",
