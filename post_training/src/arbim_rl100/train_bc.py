@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 from itertools import islice
 import random
 import sys
@@ -168,7 +169,19 @@ def _check_resume_config(requested, saved):
             )
 
 
-def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch, global_step, ema=None):
+def _save_checkpoint(path: Path, payload):
+    """Atomic persistence; keep last valid checkpoint on failed writes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        torch.save(payload, temporary, pickle_module=dill)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch,
+                       global_step, ema=None, best_val_loss=None):
     # Original RL-100 cfg/state_dicts/pickles shape, plus minimal BC-only
     # continuation state (LR schedule, EMA step and all RNG streams).
     states = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
@@ -183,11 +196,13 @@ def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch, gl
     if ema is not None:
         pickles["ema_optimization_step"] = dill.dumps(ema.optimization_step)
         pickles["ema_decay"] = dill.dumps(ema.decay)
+    if best_val_loss is not None:
+        pickles["best_val_loss"] = dill.dumps(float(best_val_loss))
     return {"cfg": cfg, "state_dicts": states, "pickles": pickles}
 
 
 def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler, *, ema=None,
-                    requested_cfg=None, restore_rng=False):
+                    requested_cfg=None, restore_rng=False, best_state=None):
     payload = torch.load(path, map_location="cpu", pickle_module=dill)
     if requested_cfg is not None:
         _check_resume_config(requested_cfg, payload["cfg"])
@@ -207,6 +222,11 @@ def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler, *, ema=None
         ema_model.load_state_dict(states["ema_model"], strict=True)
         ema_model.to(ema_device)
     saved = payload["pickles"]
+    if best_state is not None:
+        best_state["val_loss"] = (
+            float(dill.loads(saved["best_val_loss"]))
+            if "best_val_loss" in saved else float("inf")
+        )
     epoch, global_step = (
         int(dill.loads(saved["epoch"])),
         int(dill.loads(saved["global_step"])),
@@ -248,6 +268,15 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
         raise FileNotFoundError(f"Missing offline Zarr: {zarr_path}")
     output = Path(cfg.output.dir).expanduser()
     checkpoint = output / "checkpoints" / "latest.ckpt"
+    best_checkpoint = output / "checkpoints" / "best.ckpt"
+    metrics_path = output / "metrics.jsonl"
+    if resume is not None and resume.resolve() != checkpoint.resolve():
+        raise ValueError("--resume must point to output.dir/checkpoints/latest.ckpt")
+    if resume is None and (best_checkpoint.exists() or metrics_path.exists()):
+        raise FileExistsError(
+            f"Prior BC training artifacts exist under {output}; "
+            "choose a fresh --output-dir or resume the matching checkpoint"
+        )
     if checkpoint.exists() and resume is None:
         raise FileExistsError(
             f"{checkpoint} already exists; specify --resume to continue "
@@ -307,10 +336,12 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
         num_training_steps=steps_per_epoch * epochs,
     )
     start_epoch, global_step = (0, 0)
+    best_state = {"val_loss": float("inf")}
     if resume is not None:
         start_epoch, global_step = load_checkpoint(
             resume, model, optimizer, ema_model, lr_scheduler,
             ema=ema, requested_cfg=cfg, restore_rng=True,
+            best_state=best_state,
         )
         if start_epoch >= epoch_limit:
             raise ValueError(
@@ -350,28 +381,42 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
         if len(val_loader) > 0 and cfg.training.max_val_steps != 0:
             model.eval()
             val_losses = []
-            with torch.no_grad():
+            # Native diffusion validation samples random noise/timesteps.
+            # Fix its RNG for comparable epochs without perturbing training.
+            cuda_devices = list(range(torch.cuda.device_count())) if device.type == "cuda" else []
+            with torch.random.fork_rng(devices=cuda_devices), torch.no_grad():
+                torch.manual_seed(seed + 1_000_003)
                 for step, sample in enumerate(val_loader):
                     loss, _ = model.compute_loss(bc_batch(sample, n_obs_steps, device))
+                    if not torch.isfinite(loss).all().item():
+                        raise FloatingPointError(f"Nonfinite validation loss on epoch={epoch} step={step}")
                     val_losses.append(loss.item())
                     if cfg.training.max_val_steps is not None and step + 1 >= int(cfg.training.max_val_steps):
                         break
             result["val_loss"] = float(np.mean(val_losses))
+        is_best = "val_loss" in result and result["val_loss"] < best_state["val_loss"]
+        if is_best:
+            best_state["val_loss"] = result["val_loss"]
+        result["best_val_loss"] = (
+            best_state["val_loss"] if np.isfinite(best_state["val_loss"]) else None
+        )
+        result["lr"] = float(optimizer.param_groups[0]["lr"])
         print(f"[BC] {result}")
         if ((epoch + 1) % int(cfg.training.checkpoint_every) == 0
-                or epoch + 1 == epoch_limit):
-            checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            tmp = checkpoint.with_name(checkpoint.name + ".tmp")
-            try:
-                torch.save(
-                    checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler,
-                                       epoch + 1, global_step, ema=ema),
-                    tmp, pickle_module=dill,
-                )
-                tmp.replace(checkpoint)
-            finally:
-                tmp.unlink(missing_ok=True)
-            print(f"[PASS] Saved BC checkpoint: {checkpoint}")
+                or epoch + 1 == epoch_limit or is_best):
+            payload = checkpoint_payload(
+                cfg, model, optimizer, ema_model, lr_scheduler,
+                epoch + 1, global_step, ema=ema,
+                best_val_loss=best_state["val_loss"],
+            )
+            if (epoch + 1) % int(cfg.training.checkpoint_every) == 0 or epoch + 1 == epoch_limit:
+                _save_checkpoint(checkpoint, payload)
+                print(f"[PASS] Saved BC checkpoint: {checkpoint}")
+            if is_best:
+                _save_checkpoint(best_checkpoint, payload)
+                print(f"[PASS] Saved best validation BC checkpoint: {best_checkpoint}")
+        with metrics_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(result, sort_keys=True) + "\n")
     return checkpoint
 
 
