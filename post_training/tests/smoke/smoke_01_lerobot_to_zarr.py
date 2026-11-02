@@ -103,7 +103,7 @@ class LeRobotToZarrTest(unittest.TestCase):
         depth_names = ("observation.depth_h", "observation.depth_l", "observation.depth_r")
         for i, frame in enumerate(dataset.frames):
             for j, key in enumerate(depth_names):
-                frame[key] = torch.full((1, 5, 7), i * 10 + j, dtype=torch.uint16)
+                frame[key] = np.full((1, 5, 7), i * 10 + j, dtype=np.uint16)
         out = convert_dataset(
             dataset, self.path / "depth.zarr", reward_json=self.labels,
             use_depth=True,
@@ -112,9 +112,9 @@ class LeRobotToZarrTest(unittest.TestCase):
         self.assertTrue(root.attrs["use_depth"])
         data = root["data"]
         self.assertEqual(data["head_depth"].dtype, np.dtype("uint16"))
-        np.testing.assert_array_equal(data["head_depth"][0], 0)
-        np.testing.assert_array_equal(data["next_head_depth"][0], 10)
-        np.testing.assert_array_equal(data["next_head_depth"][2], 20)
+        self.assertTrue(np.all(data["head_depth"][0] == 0))
+        self.assertTrue(np.all(data["next_head_depth"][0] == 10))
+        self.assertTrue(np.all(data["next_head_depth"][2] == 20))
 
     def test_reused_legacy_batch_video_decoder(self):
         dataset = _Dataset()
@@ -208,6 +208,31 @@ class LeRobotToZarrTest(unittest.TestCase):
                 dataset, self.path / "bad_recorded.zarr",
                 reward_mode="last_gripper_release_sparse", source_path=source,
             )
+        (meta / "arbim_staging_provenance.json").unlink()
+        merged = {
+            "format": "arbim_lerobot_merge_provenance_v1",
+            "episodes": [
+                {"output_episode_index": 0, "frames": 12,
+                 "staging_reward": {
+                     "reward_status": "valid",
+                     "reward_mode": "last_gripper_release_sparse",
+                     "reward_index": 5, "reward_event": {"frame_offset": 5},
+                 }},
+                {"output_episode_index": 1, "frames": 12,
+                 "staging_reward": None},
+            ],
+        }
+        (meta / "arbim_merge_provenance.json").write_text(json.dumps(merged))
+        out = convert_dataset(
+            dataset, self.path / "mixed.zarr",
+            reward_mode="last_gripper_release_sparse", source_path=source,
+        )
+        mixed = zarr.open_group(str(out), mode="r")
+        self.assertEqual(mixed.attrs["reward_source"], "mixed_lerobot_reward_v2")
+        self.assertTrue(mixed.attrs["reward_validated"])
+        reward = mixed["data"]["reward"][:, 0]
+        self.assertEqual(int(np.count_nonzero(reward)), 2)
+        np.testing.assert_array_equal(reward[[5, 19]], [1, 1])
 
     def test_reject_zarr3_with_actionable_error(self):
         from unittest.mock import patch
