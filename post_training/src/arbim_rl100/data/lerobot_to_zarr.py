@@ -31,6 +31,8 @@ DEPTH_FEATURE_TO_BUFFER = {
     "observation.depth_r": "wrist_right_depth",
 }
 
+REWARD_MODE_LAST_GRIPPER_RELEASE_SPARSE = "last_gripper_release_sparse"
+
 RGB_FEATURES = {
     "observation.images.head_cam_h": "head_rgb",
     "observation.images.wrist_cam_l": "wrist_left_rgb",
@@ -528,6 +530,145 @@ def _last_gripper_release_offsets(dataset, episodes, config):
 
 
 
+def _validate_recorded_reward(episode_id, indices, row):
+    if row.get("reward_status") != "valid":
+        raise ValueError(
+            f"Episode {episode_id} has invalid recorded Reward V2; "
+            "export only valid-reward Staging episodes for RL"
+        )
+    if row.get("reward_mode") not in (None, REWARD_MODE_LAST_GRIPPER_RELEASE_SPARSE):
+        raise ValueError(f"Episode {episode_id}: unsupported recorded Reward mode")
+    offset = row.get("reward_index")
+    event = row.get("reward_event")
+    if (
+        not isinstance(offset, int)
+        or not 0 <= offset < len(indices) - 1
+        or not isinstance(event, dict)
+        or event.get("frame_offset") != offset
+    ):
+        raise ValueError(f"Episode {episode_id}: invalid recorded Reward V2 offset")
+    return offset
+
+
+def _reward_offsets_for_subset(dataset, selected_episodes, config):
+    """Calibrate Reward V2 on only selected Teleop episodes, not staged Rollouts."""
+    if not selected_episodes:
+        return {}, None
+    action = _stack_action_column(dataset)
+    indices = np.concatenate([
+        np.asarray(frames, dtype=np.int64)
+        for frames in selected_episodes.values()
+    ])
+    selected_action = np.asarray(action[indices], dtype=np.float32)
+
+    class _ActionOnlyDataset:
+        hf_dataset = {"action": selected_action}
+
+        def __len__(self):
+            return len(selected_action)
+
+        def __getitem__(self, index):
+            return {"action": selected_action[index]}
+
+    local_episodes = {}
+    start = 0
+    for episode_id, frames in selected_episodes.items():
+        local_episodes[episode_id] = list(range(start, start + len(frames)))
+        start += len(frames)
+    return _last_gripper_release_offsets(_ActionOnlyDataset(), local_episodes, config)
+
+
+def _staging_reward_offsets(lerobot_root, episodes, config, dataset=None):
+    """Preserve Staging Reward V2 even after LeRobot merges and multiple rounds."""
+    reward_source = str(config.get("reward_source", "auto"))
+    if reward_source not in {"auto", "computed", "recorded"}:
+        raise ValueError("reward_source must be auto/computed/recorded")
+    if reward_source == "computed":
+        return None
+
+    meta = Path(lerobot_root).expanduser().resolve() / "meta"
+    staging_path = meta / "arbim_staging_provenance.json"
+    merged_path = meta / "arbim_merge_provenance.json"
+    records = None
+    origin = None
+    if staging_path.is_file():
+        with staging_path.open("r", encoding="utf-8") as fp:
+            manifest = json.load(fp)
+        if manifest.get("format") != "arbim_lerobot_staging_provenance_v1":
+            raise ValueError("unexpected Staging provenance format")
+        records = manifest.get("episodes", [])
+        origin = str(staging_path)
+    elif merged_path.is_file():
+        with merged_path.open("r", encoding="utf-8") as fp:
+            manifest = json.load(fp)
+        if manifest.get("format") != "arbim_lerobot_merge_provenance_v1":
+            raise ValueError("unexpected merged LeRobot provenance format")
+        records = manifest.get("episodes", [])
+        origin = str(merged_path)
+    if records is None:
+        if reward_source == "recorded":
+            raise FileNotFoundError(f"recorded Reward provenance missing in {meta}")
+        return None
+    if len(records) != len(episodes):
+        raise ValueError("recorded Reward episode count differs from LeRobot")
+
+    recorded_offsets = {}
+    to_compute = {}
+    for (episode_id, indices), row in zip(episodes.items(), records, strict=True):
+        direct_staging = origin == str(staging_path)
+        if direct_staging:
+            if (
+                row.get("lerobot_episode_index") != int(episode_id)
+                or row.get("num_frames") != len(indices)
+                or row.get("reward_mode") != REWARD_MODE_LAST_GRIPPER_RELEASE_SPARSE
+            ):
+                raise ValueError(f"Episode {episode_id}: Staging metadata mismatch")
+            event_row = row
+        else:
+            if (
+                row.get("output_episode_index") != int(episode_id)
+                or row.get("frames") != len(indices)
+            ):
+                raise ValueError(f"Episode {episode_id}: merged metadata mismatch")
+            event_row = row.get("staging_reward")
+
+        if event_row is not None:
+            recorded_offsets[episode_id] = _validate_recorded_reward(
+                episode_id, indices, event_row
+            )
+        else:
+            to_compute[episode_id] = indices
+
+    if not recorded_offsets:
+        if reward_source == "recorded":
+            raise ValueError("Dataset has no recorded Reward V2 episodes")
+        return None
+    if reward_source == "recorded" and to_compute:
+        raise ValueError("reward_source=recorded requires all episodes to have recorded rewards")
+    if to_compute and dataset is None:
+        raise ValueError("LeRobot dataset required to calculate mixed-source rewards")
+
+    computed, computed_metadata = _reward_offsets_for_subset(
+        dataset, to_compute, config
+    ) if to_compute else ({}, None)
+    offsets = {**computed, **recorded_offsets}
+    if set(offsets) != set(episodes):
+        raise RuntimeError("Recorded and computed Reward offsets are incomplete")
+    return offsets, {
+        "source": "mixed_lerobot_reward_v2" if to_compute else "staging_recorded_v1",
+        "provenance": origin,
+        "recorded_count": len(recorded_offsets),
+        "computed_count": len(computed),
+        "computed_metadata": computed_metadata,
+        "episodes": [
+            {"episode_index": int(ep), "reward_offset": int(offsets[ep]),
+             "source": "recorded" if ep in recorded_offsets else "computed"}
+            for ep in episodes
+        ],
+    }
+
+
+
 class _ZarrWriter:
     def __init__(
         self, path: Path, count: int, first: dict, jpeg_quality: int,
@@ -714,10 +855,22 @@ def convert_dataset(
             episode_id: list(range(start, end))
             for episode_id, start, end in episodes
         }
-        # Original kdc_ARBiM Reward V2 detector, not a new reward definition.
-        reward_offsets, computed_metadata = _last_gripper_release_offsets(
-            dataset, episode_indices, reward_config or {}
-        )
+        config = reward_config or {}
+        recorded = None
+        if source_path is not None:
+            recorded = _staging_reward_offsets(
+                source_path, episode_indices, config, dataset
+            )
+        elif config.get("reward_source") == "recorded":
+            raise ValueError("recorded reward source requires source_path")
+        # Original ARBiM: prefer validated recorded Staging Reward V2,
+        # otherwise use original gripper-release calibration on Teleop.
+        if recorded is None:
+            reward_offsets, computed_metadata = _last_gripper_release_offsets(
+                dataset, episode_indices, config
+            )
+        else:
+            reward_offsets, computed_metadata = recorded
     # Original kdc_ARBiM batch decode; new LeRobot's private method moved
     # from the facade onto DatasetReader. Synthetic fixtures use item fallback.
     batch_decode = _can_batch_decode(dataset)
@@ -733,7 +886,7 @@ def convert_dataset(
             ),
             "reward_source": (
                 "recorded_validated" if reward_mode == "recorded_sparse"
-                else "computed_last_gripper_release"
+                else computed_metadata.get("source", "computed_last_gripper_release")
                 if reward_mode == "last_gripper_release_sparse"
                 else "terminal_proxy_not_success_label"
             ),
@@ -861,6 +1014,7 @@ def main() -> None:
     parser.add_argument("--reward-open-infer-frames", type=int, default=5)
     parser.add_argument("--reward-min-dwell", type=int, default=3)
     parser.add_argument("--reward-expected-cycles", type=int, default=1)
+    parser.add_argument("--reward-source", choices=("auto", "recorded", "computed"), default="auto")
     args = parser.parse_args()
     root = args.lerobot_root.expanduser().resolve()
     if not (root / "meta" / "info.json").is_file():
@@ -885,6 +1039,7 @@ def main() -> None:
             "reward_open_infer_frames": args.reward_open_infer_frames,
             "reward_min_dwell": args.reward_min_dwell,
             "reward_expected_cycles": args.reward_expected_cycles,
+            "reward_source": args.reward_source,
         },
     )
     print(f"[PASS] Created offline Zarr cache: {output}")
