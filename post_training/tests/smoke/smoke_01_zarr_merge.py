@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import torch
 import zarr
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -73,7 +74,7 @@ class ZarrMergeTest(unittest.TestCase):
             self.assertEqual(int(offsets[5]), int(original_offsets[-1]))
             self.assertEqual(int(offsets[6] - offsets[5]), int(original_offsets[1] - original_offsets[0]))
 
-        buffer = OfflineBuffer()
+        buffer = OfflineBuffer(device=torch.device('cpu'), gamma=0.9)
         buffer.load_zarr(str(self.output))
         self.assertEqual(len(buffer), 10)
         self.assertEqual(buffer["head_rgb"][5].shape, (3, 8, 12))
@@ -111,6 +112,7 @@ class ZarrMergeTest(unittest.TestCase):
     def test_reject_incompatible_action_shape_and_duplicate(self):
         second = zarr.open_group(str(self.second), mode="a")
         second["data"]["action"].resize((5, 4))
+        second["data"]["next_action"].resize((5, 4))
         with self.assertRaisesRegex(ValueError, "incompatible action dtype or trailing dimensions"):
             self.merge()
         self.assertFalse(self.output.exists())
