@@ -422,26 +422,11 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
 
 def main():
     raise RuntimeError(
-        "The Zarr-based BC trainer has been retired. "
-        "BC/IL must use the LeRobot Dataset and native RL1002D policy plugin: "
+        "Zarr-based BC training is retired. Train the native RL1002D policy "
+        "directly on LeRobot datasets via: "
         "python kuavo_model/train.py --policy rl100_2d. "
         "Zarr is reserved for RL post-training."
     )
-    # Retain the historical entrypoint below only for past experiment audit.
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--resume", type=Path, default=None)
-    parser.add_argument("--stop-after-epoch", type=int, default=None,
-                        help="Run through this absolute epoch index (1-based), then save; "
-                             "does not alter scheduled total epochs")
-    parser.add_argument("--output-dir", type=Path, default=None,
-                        help="Override only output.dir; useful for reproducible resume comparison")
-    args = parser.parse_args()
-    cfg = OmegaConf.load(args.config)
-    if args.output_dir is not None:
-        cfg.output.dir = str(args.output_dir)
-    train(cfg, resume=args.resume, stop_after_epoch=args.stop_after_epoch)
-
 
 if __name__ == "__main__":
     main()
