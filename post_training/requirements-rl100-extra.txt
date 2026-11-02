@@ -1,0 +1,12 @@
+# ARBiM RL-100 incremental dependencies.
+# Run from the LeTools-Learning repository root:
+#   python -m pip install --no-build-isolation -r post_training/requirements-rl100-extra.txt
+#
+# Add new RL-100 integration dependencies here as we encounter/validate them.
+# Do not duplicate LeTools' base requirements or copy RL-100's full environment.
+#
+# PyTorch3D: use RL-100's bundled minimal *real* extension, not a fake stub.
+# Source version is pinned by the RL-100 git submodule (6b6afceb7eb12525398207b5d6e66908863dc385).
+# Requires a working PyTorch installation and C++ build toolchain;
+# CUDA compilation additionally needs a compatible CUDA toolkit/nvcc.
+-e ./third_party/rl100/third_party/pytorch3d_simplified
