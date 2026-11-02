@@ -199,9 +199,42 @@ contract integrated; full BC training, eval and checkpointing are
 still Batch 02. Neither this smoke nor the synthetic tests prove
 the user's real LeRobot 10-bag conversion ran successfully.
 
+## Batch 01 source-preservation review (work branch, unvalidated)
+
+Comparison base: `ChangZhangZC/kdc_ARBiM@feature/flywheel`
+`post_training/src/post_rl/data/data_prepare.py`; integration work branch:
+`gpt/rl100-data-source-parity`. Earlier synthetic suites passed (9+3),
+**but this new expanded source-port still requires server tests**.
+
+- `offline_buffer.py`, `offline_dataset.py`, `sampler.py`: no changes;
+  destination/source Git Blob hashes are identical.
+- `batch_adapter.py`: leave the already tested mandatory 3-RGB/name
+  conversion as the only model-facing data adapter.
+- `lerobot_to_zarr.py`: original ARBiM `_batch_column`,
+  `_stack_video_batch`, `_load_lerobot_frame_batch`, original
+  `_to_uint8_chw`, gripper-release Reward V2 and Staging/merged
+  provenance functions restored; `Streaming build_db` progress restored;
+  original optional Depth and `episode_end_shaped` processing restored.
+- Necessary LeRobot 0.5.x differences: batching uses
+  `dataset.reader._query_videos` (not old `dataset._query_videos`),
+  supports stacked tensor columns, and keeps the pinned public item
+  API as a fallback. `--video-backend pyav` remains the server's
+  source-compatible workaround for TorchCodec binary errors.
+- Existing safety contracts retained: no overwrite, temporary Zarr
+  output, episode-safe transitions, explicit unvalidated
+  `terminal_proxy` **for BC smoke only**, and prohibition of silent
+  RL reward fabrication. The old `raw_to_npy` and `build_db` modes
+  belong to a separate conversion path; Zarr merge is not part of
+  this port and must reuse the old `zarr_merge.py` later.
+
+Current real-data conversion remains unverified. Do not promote the
+work branch to `feature/rl100-data` or `arbim/dev` until the expanded
+synthetic tests and a short genuine LeRobot conversion run pass, and the
+original `jpeg_bytes_v1` payload can be read by OfflineBuffer.
+
 ## Remaining Batch 01 work
 
-1. `gpt/rl100-lerobot-zarr`: initial LeRobot 0.5.2 → Zarr converter and synthetic contract tests implemented (see `LEROBOT_TO_ZARR_RL100.md`); real-data validation, computed Reward V2 and performance benchmarking still pending.
+1. `gpt/rl100-data-source-parity`: review-phase port restores old batch decoder, computed/recorded Reward V2, optional Depth and progress; expanded tests and real-data performance/contract validation still pending. See `LEROBOT_TO_ZARR_RL100.md`.
 2. `gpt/rl100-offline-reader`: original `offline_buffer.py`, `sampler.py`, `offline_dataset.py` copied verbatim from `kdc_ARBiM@feature/flywheel` (verified matching Git blob SHA); synthetic Zarr→Dataset→RL1002D batch-adapter test added, server validation pending. Native RL1002D `LinearNormalizer` fitting remains for subsequent integration.
 3. `gpt/rl100-zarr-merge`: port metadata-aware merge with episode/offset/reward checks.
 4. Real-data smoke tests, then promote `feature/rl100-data` to `arbim/dev`.
