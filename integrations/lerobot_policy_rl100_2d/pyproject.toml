@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_policy_rl100_2d"
+version = "0.1.0"
+description = "Native RL-100 2D Diffusion Policy adapter for LeRobot 0.5.x / LeTools"
+requires-python = ">=3.12"
+# Install with --no-deps inside the existing LeTools/RL-100 environment:
+# third_party/lerobot and third_party/rl100 remain pinned Git submodules.
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
