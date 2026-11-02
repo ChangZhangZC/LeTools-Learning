@@ -113,7 +113,7 @@ class ZarrMergeTest(unittest.TestCase):
         second = zarr.open_group(str(self.second), mode="a")
         second["data"]["action"].resize((5, 4))
         second["data"]["next_action"].resize((5, 4))
-        with self.assertRaisesRegex(ValueError, "incompatible action dtype or trailing dimensions"):
+        with self.assertRaisesRegex(ValueError, "incompatible (?:next_)?action dtype or trailing dimensions"):
             self.merge()
         self.assertFalse(self.output.exists())
         with self.assertRaisesRegex(ValueError, "duplicate Zarr source"):
