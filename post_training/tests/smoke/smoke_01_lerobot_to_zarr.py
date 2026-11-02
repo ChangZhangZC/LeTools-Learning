@@ -30,7 +30,7 @@ class _Dataset:
             self.frames.append({
                 "observation.state": torch.tensor([i, 10 + i], dtype=torch.float32),
                 "action": torch.tensor([100 + i, 200 + i, 300 + i], dtype=torch.float32),
-                "observation.images.head_cam_h": torch.full((3, 8, 12), i * 30, dtype=torch.uint8),
+                "observation.images.head_cam_h": torch.full((3, 8, 12), (i * 30) % 256, dtype=torch.uint8),
                 "observation.images.wrist_cam_l": torch.full((3, 8, 12), 70, dtype=torch.uint8),
                 "observation.images.wrist_cam_r": torch.full((3, 8, 12), 0.5, dtype=torch.float32),
             })
