@@ -32,6 +32,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--expected-epoch", type=int, default=1)
+    parser.add_argument("--expected-step", type=int, default=1)
     args = parser.parse_args()
     payload = torch.load(args.checkpoint, map_location="cpu", pickle_module=dill)
     config = payload["cfg"]
@@ -72,8 +74,17 @@ def main():
     epoch, global_step = load_checkpoint(
         args.checkpoint, model, optimizer, ema_model, scheduler
     )
-    if epoch != 1 or global_step != 1:
-        raise AssertionError(f"Expected one-step checkpoint, got epoch={epoch}, global_step={global_step}")
+    if epoch != args.expected_epoch or global_step != args.expected_step:
+        raise AssertionError(
+            f"Expected epoch={args.expected_epoch}, step={args.expected_step}, "
+            f"got epoch={epoch}, global_step={global_step}"
+        )
+    if "ema_optimization_step" in payload["pickles"]:
+        ema_step = int(dill.loads(payload["pickles"]["ema_optimization_step"]))
+        if ema_step != global_step:
+            raise AssertionError(f"EMA optimization step drift: {ema_step} != {global_step}")
+        if "rng_state" not in payload["pickles"]:
+            raise AssertionError("New continuation checkpoint must preserve RNG state")
     for key, expected in payload["state_dicts"]["model"].items():
         actual = model.state_dict()[key]
         if not torch.equal(actual.detach().cpu(), expected):
