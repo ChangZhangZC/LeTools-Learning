@@ -128,37 +128,100 @@ def bc_batch(sample, n_obs_steps, device):
     }
 
 
-def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch, global_step):
-    # RL-100 TrainDP3Workspace.save_checkpoint shape: cfg/state_dicts/pickles.
-    # This is a BC-only workspace; it cannot instantiate the full original
-    # TrainDP3Workspace without Critic/Dynamics/PPO/task configuration.
+def _rng_state():
+    """Capture RNG after validation, at an epoch boundary."""
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+
+
+def _restore_rng_state(state):
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if state["torch_cuda"] is not None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Checkpoint records CUDA RNG but CUDA is unavailable")
+        if len(state["torch_cuda"]) != torch.cuda.device_count():
+            raise ValueError("CUDA device count changed; exact resume is not supported")
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def _check_resume_config(requested, saved):
+    # Scheduler and BC sampling depend on these settings. Changing epochs
+    # while resuming an already constructed cosine schedule is not valid.
+    for section in ("data", "policy", "training"):
+        new = OmegaConf.to_container(requested[section], resolve=True)
+        old = OmegaConf.to_container(saved[section], resolve=True)
+        if section == "training":
+            new.pop("device", None)
+            old.pop("device", None)
+        if new != old:
+            raise ValueError(
+                f"Resume {section} config differs from checkpoint. "
+                "Use the original config for exact continuation; use a new "
+                "output directory for a new training experiment."
+            )
+
+
+def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch, global_step, ema=None):
+    # Original RL-100 cfg/state_dicts/pickles shape, plus minimal BC-only
+    # continuation state (LR schedule, EMA step and all RNG streams).
     states = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
               "lr_scheduler": lr_scheduler.state_dict()}
     if ema_model is not None:
         states["ema_model"] = ema_model.state_dict()
-    return {
-        "cfg": cfg, "state_dicts": states,
-        "pickles": {"epoch": dill.dumps(epoch), "global_step": dill.dumps(global_step)},
+    pickles = {
+        "epoch": dill.dumps(epoch),
+        "global_step": dill.dumps(global_step),
+        "rng_state": dill.dumps(_rng_state()),
     }
+    if ema is not None:
+        pickles["ema_optimization_step"] = dill.dumps(ema.optimization_step)
+        pickles["ema_decay"] = dill.dumps(ema.decay)
+    return {"cfg": cfg, "state_dicts": states, "pickles": pickles}
 
 
-def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler):
+def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler, *, ema=None,
+                    requested_cfg=None, restore_rng=False):
     payload = torch.load(path, map_location="cpu", pickle_module=dill)
+    if requested_cfg is not None:
+        _check_resume_config(requested_cfg, payload["cfg"])
     states = payload["state_dicts"]
+    if (ema_model is None) != ("ema_model" not in states):
+        raise ValueError("Checkpoint EMA enabled state differs from training config")
     model.load_state_dict(states["model"], strict=True)
     optimizer.load_state_dict(states["optimizer"])
     lr_scheduler.load_state_dict(states["lr_scheduler"])
     if ema_model is not None:
         ema_model.load_state_dict(states["ema_model"], strict=True)
-    elif "ema_model" in states:
-        raise ValueError("Checkpoint expects an EMA model; enable training.use_ema")
-    return (
-        int(dill.loads(payload["pickles"]["epoch"])),
-        int(dill.loads(payload["pickles"]["global_step"])),
+    saved = payload["pickles"]
+    epoch, global_step = (
+        int(dill.loads(saved["epoch"])),
+        int(dill.loads(saved["global_step"])),
     )
+    if ema is not None:
+        # Older validated single-step checkpoints did not store this counter.
+        ema.optimization_step = (
+            int(dill.loads(saved["ema_optimization_step"]))
+            if "ema_optimization_step" in saved else global_step
+        )
+        if "ema_decay" in saved:
+            ema.decay = float(dill.loads(saved["ema_decay"]))
+        elif global_step > 0:
+            ema.decay = ema.get_decay(global_step - 1)
+    if restore_rng:
+        if "rng_state" in saved:
+            _restore_rng_state(dill.loads(saved["rng_state"]))
+        else:
+            print("[WARN] Legacy checkpoint has no RNG state: exact continuation not guaranteed")
+    return epoch, global_step
 
 
-def train(cfg, resume: Path | None = None):
+def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
     seed = int(cfg.data.seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -187,6 +250,9 @@ def train(cfg, resume: Path | None = None):
         raise ValueError("epochs and batch_size must be positive")
     if int(cfg.training.checkpoint_every) < 1:
         raise ValueError("checkpoint_every must be positive")
+    if stop_after_epoch is not None and not 1 <= stop_after_epoch <= epochs:
+        raise ValueError("--stop-after-epoch must be in [1, training.epochs]")
+    epoch_limit = epochs if stop_after_epoch is None else stop_after_epoch
 
     buffer = OfflineBuffer(device=torch.device("cpu"), gamma=0.99, use_depth=False)
     buffer.load_zarr(str(zarr_path.resolve()))
@@ -235,17 +301,28 @@ def train(cfg, resume: Path | None = None):
     start_epoch, global_step = (0, 0)
     if resume is not None:
         start_epoch, global_step = load_checkpoint(
-            resume, model, optimizer, ema_model, lr_scheduler
+            resume, model, optimizer, ema_model, lr_scheduler,
+            ema=ema, requested_cfg=cfg, restore_rng=True,
         )
-        print(f"[PASS] Restored epoch={start_epoch}, global_step={global_step}")
+        if start_epoch >= epoch_limit:
+            raise ValueError(
+                f"Checkpoint has completed epoch {start_epoch}; "
+                f"requested stop is epoch {epoch_limit}. Nothing to train."
+            )
+        print(f"[PASS] Restored epoch={start_epoch}, global_step={global_step}; "
+              f"EMA step={ema.optimization_step if ema else 'disabled'}")
     print(f"Train episodes={int(dataset.train_mask.sum())}; "
           f"train windows={len(dataset)}; val windows={len(val_dataset)}; "
           f"steps/epoch={steps_per_epoch}")
     output.mkdir(parents=True, exist_ok=True)
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, epoch_limit):
         model.train()
         train_losses = []
-        for step, sample in enumerate(tqdm(train_loader, desc=f"Training epoch {epoch}")):
+        for step, sample in enumerate(tqdm(
+            train_loader, desc=f"Training epoch {epoch}",
+            total=steps_per_epoch, leave=False,
+        )):
+
             batch = bc_batch(sample, n_obs_steps, device)
             raw_loss, details = model.compute_loss(batch)
             if not torch.isfinite(raw_loss).all().item():
@@ -275,13 +352,19 @@ def train(cfg, resume: Path | None = None):
                         break
             result["val_loss"] = float(np.mean(val_losses))
         print(f"[BC] {result}")
-        if (epoch + 1) % int(cfg.training.checkpoint_every) == 0:
+        if ((epoch + 1) % int(cfg.training.checkpoint_every) == 0
+                or epoch + 1 == epoch_limit):
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler,
-                                   epoch + 1, global_step),
-                checkpoint, pickle_module=dill,
-            )
+            tmp = checkpoint.with_name(checkpoint.name + ".tmp")
+            try:
+                torch.save(
+                    checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler,
+                                       epoch + 1, global_step, ema=ema),
+                    tmp, pickle_module=dill,
+                )
+                tmp.replace(checkpoint)
+            finally:
+                tmp.unlink(missing_ok=True)
             print(f"[PASS] Saved BC checkpoint: {checkpoint}")
     return checkpoint
 
@@ -290,8 +373,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resume", type=Path, default=None)
+    parser.add_argument("--stop-after-epoch", type=int, default=None,
+                        help="Run through this absolute epoch index (1-based), then save; "
+                             "does not alter scheduled total epochs")
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="Override only output.dir; useful for reproducible resume comparison")
     args = parser.parse_args()
-    train(OmegaConf.load(args.config), resume=args.resume)
+    cfg = OmegaConf.load(args.config)
+    if args.output_dir is not None:
+        cfg.output.dir = str(args.output_dir)
+    train(cfg, resume=args.resume, stop_after_epoch=args.stop_after_epoch)
 
 
 if __name__ == "__main__":
