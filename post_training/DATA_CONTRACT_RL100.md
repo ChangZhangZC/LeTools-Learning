@@ -74,7 +74,7 @@ This checks dynamic state/action dimensions, single/batched input, RGB layout/ra
 
 ## Remaining Batch 01 work
 
-1. `gpt/rl100-lerobot-zarr`: migrate and validate the real LeRobot 0.5.2 → Zarr converter.
+1. `gpt/rl100-lerobot-zarr`: initial LeRobot 0.5.2 → Zarr converter and synthetic contract tests implemented (see `LEROBOT_TO_ZARR_RL100.md`); real-data validation, computed Reward V2 and performance benchmarking still pending.
 2. `gpt/rl100-dataset-adapter`: port the lazy JPEG OfflineBuffer and episode sampler; build a proper RL100Dataset with validation split and fitted native `LinearNormalizer`.
 3. `gpt/rl100-zarr-merge`: port metadata-aware merge with episode/offset/reward checks.
 4. Real-data smoke tests, then promote `feature/rl100-data` to `arbim/dev`.
