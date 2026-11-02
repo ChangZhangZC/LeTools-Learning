@@ -543,6 +543,10 @@ class _ZarrWriter:
         self.pending: list[dict] = []
         self.byte_positions = {key: 0 for key in RGB_FEATURES.values()}
         self.shapes = {k: list(v.shape) for k, v in first["rgb"].items()}
+        self.use_depth = "depth" in first
+        self.depth_shapes = {
+            k: list(v.shape) for k, v in first.get("depth", {}).items()
+        }
         state_dim = first["state"].size
         action_dim = first["action"].size
         comp = Blosc(cname="zstd", clevel=3, shuffle=Blosc.SHUFFLE)
@@ -576,13 +580,21 @@ class _ZarrWriter:
                 dtype="i8", compressor=comp,
             )
             self.arrays[f"{name}_jpeg_offsets"][0] = 0
+        if self.use_depth:
+            for name, value in first["depth"].items():
+                for key in (name, f"next_{name}"):
+                    self.arrays[key] = self.data.create_dataset(
+                        key, shape=(count, *value.shape),
+                        chunks=(n_chunk, *value.shape),
+                        dtype=value.dtype, compressor=comp,
+                    )
         self.root.attrs.update({
             "rgb_storage": "jpeg_bytes_v1",
             "rgb_shapes": self.shapes,
             "rgb_dtype": "uint8",
             "state_dim": state_dim,
             "action_dim": action_dim,
-            "use_depth": False,
+            "use_depth": self.use_depth,
         })
 
     def append(self, transition: dict):
@@ -600,6 +612,11 @@ class _ZarrWriter:
         for key in CORE:
             values = [item[key] for item in self.pending]
             self.arrays[key][start:end] = np.asarray(values, dtype=self.arrays[key].dtype)
+        if self.use_depth:
+            for name in DEPTH_FEATURE_TO_BUFFER.values():
+                for field, data_key in (("depth", name), ("next_depth", f"next_{name}")):
+                    values = [item[field][name] for item in self.pending]
+                    self.arrays[data_key][start:end] = np.stack(values)
         for name in RGB_FEATURES.values():
             payloads = [_jpeg(item["rgb"][name], self.jpeg_quality) for item in self.pending]
             payload = b"".join(payloads)
@@ -618,8 +635,14 @@ class _ZarrWriter:
         self.pending.clear()
 
 
-def _frame(raw: dict, state_dim=None, action_dim=None, rgb_shapes=None) -> dict:
-    required = ("observation.state", "action", *RGB_FEATURES.keys())
+def _frame(
+    raw: dict, state_dim=None, action_dim=None, rgb_shapes=None,
+    use_depth: bool = False, depth_shapes=None,
+) -> dict:
+    required = (
+        "observation.state", "action", *RGB_FEATURES.keys(),
+        *(DEPTH_FEATURE_TO_BUFFER.keys() if use_depth else ()),
+    )
     missing = [key for key in required if key not in raw]
     if missing:
         raise KeyError(f"Missing LeRobot feature(s): {missing}")
@@ -631,6 +654,14 @@ def _frame(raw: dict, state_dim=None, action_dim=None, rgb_shapes=None) -> dict:
     for feature, name in RGB_FEATURES.items():
         expected = None if rgb_shapes is None else tuple(rgb_shapes[name])
         result["rgb"][name] = _rgb(raw[feature], feature, expected)
+    if use_depth:
+        result["depth"] = {}
+        for feature, name in DEPTH_FEATURE_TO_BUFFER.items():
+            value = _numpy(raw[feature], feature)
+            expected = None if depth_shapes is None else tuple(depth_shapes[name])
+            if expected is not None and value.shape != expected:
+                raise ValueError(f"{feature}: depth shape drift {value.shape}, expected {expected}")
+            result["depth"][name] = np.ascontiguousarray(value)
     return result
 
 
@@ -651,7 +682,7 @@ def convert_dataset(
     reward_json: str | Path | None = None, gamma: float = 0.99,
     jpeg_quality: int = 95, stream_batch_size: int = 32,
     source_path: str | Path | None = None,
-    reward_config: dict | None = None,
+    reward_config: dict | None = None, use_depth: bool = False,
 ) -> Path:
     """Convert a local LeRobotDataset-like object; never overwrite output."""
     _require_zarr_v2()
@@ -690,7 +721,7 @@ def convert_dataset(
     # Original kdc_ARBiM batch decode; new LeRobot's private method moved
     # from the facade onto DatasetReader. Synthetic fixtures use item fallback.
     batch_decode = _can_batch_decode(dataset)
-    first = _frame(dataset[0])
+    first = _frame(dataset[0], use_depth=use_depth)
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=output.name + ".partial.", dir=output.parent))
     try:
@@ -735,10 +766,11 @@ def convert_dataset(
             for batch_start in range(start, end, stream_batch_size):
                 batch_indices = list(range(batch_start, min(batch_start + stream_batch_size, end)))
                 if batch_decode:
-                    raw_batch = _load_lerobot_frame_batch(dataset, episode_id, batch_indices, False)
+                    raw_batch = _load_lerobot_frame_batch(dataset, episode_id, batch_indices, use_depth)
                     raw_batch = [
                         {"observation.state": row["agent_pos"],
-                         "action": row["action"], **row["rgb"]}
+                         "action": row["action"], **row["rgb"],
+                         **(row.get("depth", {}) if use_depth else {})}
                         for row in raw_batch
                     ]
                 else:
@@ -746,7 +778,8 @@ def convert_dataset(
                 for index, raw in zip(batch_indices, raw_batch, strict=True):
                     current = first if index == 0 else _frame(
                         raw, first["state"].size, first["action"].size,
-                        writer.shapes,
+                        writer.shapes, use_depth=use_depth,
+                        depth_shapes=writer.depth_shapes,
                     )
                     step = index - start
                     terminal = index == end - 1
@@ -759,7 +792,11 @@ def convert_dataset(
                         writer.append({
                             "state": pending["state"], "next_state": current["state"],
                             "action": pending["action"], "next_action": current["action"],
-                            "rgb": pending["rgb"], "reward": [episode_rewards[-2]],
+                            "rgb": pending["rgb"],
+                            **({
+                                "depth": pending["depth"], "next_depth": current["depth"]
+                            } if use_depth else {}),
+                            "reward": [episode_rewards[-2]],
                             "return": [0.0], "done": [False], "timeout": [False],
                             "next_index": index,
                         })
@@ -769,7 +806,11 @@ def convert_dataset(
             writer.append({
                 "state": pending["state"], "next_state": pending["state"],
                 "action": pending["action"], "next_action": pending["action"],
-                "rgb": pending["rgb"], "reward": [episode_rewards[-1]],
+                "rgb": pending["rgb"],
+                **({
+                    "depth": pending["depth"], "next_depth": pending["depth"]
+                } if use_depth else {}),
+                "reward": [episode_rewards[-1]],
                 "return": [0.0], "done": [True], "timeout": [True],
                 "next_index": end - 1,
             })
@@ -812,6 +853,7 @@ def main() -> None:
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--stream-batch-size", type=int, default=32)
     parser.add_argument("--video-backend", default=None)
+    parser.add_argument("--use-depth", action="store_true")
     parser.add_argument("--reward-left-gripper-index", type=int, default=7)
     parser.add_argument("--reward-right-gripper-index", type=int, default=15)
     parser.add_argument("--reward-left-open-side", choices=("auto", "low", "high"), default="auto")
@@ -834,6 +876,7 @@ def main() -> None:
         reward_json=args.reward_json, gamma=args.gamma,
         jpeg_quality=args.jpeg_quality,
         stream_batch_size=args.stream_batch_size, source_path=root,
+        use_depth=args.use_depth,
         reward_config={
             "reward_left_gripper_index": args.reward_left_gripper_index,
             "reward_right_gripper_index": args.reward_right_gripper_index,
