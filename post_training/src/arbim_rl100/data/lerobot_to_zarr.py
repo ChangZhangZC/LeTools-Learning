@@ -289,6 +289,245 @@ def _can_batch_decode(dataset):
 
 
 
+def _stack_action_column(dataset):
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is not None:
+        try:
+            values = hf_dataset["action"]
+            action = np.stack(
+                [
+                    _as_numpy(value, "action", index)
+                    for index, value in enumerate(values)
+                ],
+                axis=0,
+            )
+        except (KeyError, TypeError, ValueError):
+            action = None
+        if action is not None:
+            if action.ndim != 2:
+                raise ValueError(f"Expected action column [N,D], got {action.shape}")
+            return action.astype(np.float32, copy=False)
+
+    action = np.stack(
+        [
+            _as_numpy(dataset[index]["action"], "action", index)
+            for index in range(len(dataset))
+        ],
+        axis=0,
+    )
+    if action.ndim != 2:
+        raise ValueError(f"Expected action column [N,D], got {action.shape}")
+    return action.astype(np.float32, copy=False)
+
+
+def _infer_gripper_thresholds(
+    values,
+    episode_frames,
+    *,
+    open_side,
+    start_frames,
+    low_threshold=None,
+    high_threshold=None,
+):
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        raise ValueError("Gripper action contains no finite values")
+
+    q10, q90 = np.quantile(finite, [0.10, 0.90]).tolist()
+    span = q90 - q10
+    if span <= 1e-8:
+        raise ValueError(
+            f"Gripper action has almost no dynamic range: q10={q10}, q90={q90}"
+        )
+
+    low = float(low_threshold) if low_threshold is not None else q10 + 0.35 * span
+    high = float(high_threshold) if high_threshold is not None else q10 + 0.65 * span
+    if not low < high:
+        raise ValueError(
+            f"Expected low gripper threshold < high threshold, got {low} >= {high}"
+        )
+
+    starts = []
+    for frames in episode_frames:
+        take = frames[: min(int(start_frames), len(frames))]
+        starts.extend(values[np.asarray(take, dtype=np.int64)].tolist())
+    start_median = float(np.median(np.asarray(starts, dtype=np.float64)))
+
+    if open_side == "auto":
+        open_side = (
+            "low"
+            if abs(start_median - q10) <= abs(start_median - q90)
+            else "high"
+        )
+    if open_side not in {"low", "high"}:
+        raise ValueError(
+            f"reward gripper open_side must be auto/low/high, got {open_side!r}"
+        )
+
+    return {
+        "low": float(low),
+        "high": float(high),
+        "open_side": open_side,
+        "q10": float(q10),
+        "q90": float(q90),
+        "start_median": start_median,
+    }
+
+
+def _classify_gripper(value, thresholds):
+    value = float(value)
+    if value <= thresholds["low"]:
+        side = "low"
+    elif value >= thresholds["high"]:
+        side = "high"
+    else:
+        return None
+    return "open" if side == thresholds["open_side"] else "closed"
+
+
+def _debounced_gripper_transitions(values, thresholds, min_dwell):
+    state = None
+    candidate = None
+    candidate_start = None
+    candidate_count = 0
+    transitions = []
+
+    for index, value in enumerate(np.asarray(values, dtype=np.float64)):
+        classified = _classify_gripper(value, thresholds)
+        if classified is None:
+            continue
+
+        if state is None:
+            if candidate == classified:
+                candidate_count += 1
+            else:
+                candidate = classified
+                candidate_start = index
+                candidate_count = 1
+            if candidate_count >= min_dwell:
+                state = classified
+                candidate = None
+                candidate_start = None
+                candidate_count = 0
+            continue
+
+        if classified == state:
+            candidate = None
+            candidate_start = None
+            candidate_count = 0
+            continue
+
+        if candidate == classified:
+            candidate_count += 1
+        else:
+            candidate = classified
+            candidate_start = index
+            candidate_count = 1
+
+        if candidate_count >= min_dwell:
+            transitions.append(
+                {
+                    "frame_offset": int(candidate_start),
+                    "from_state": state,
+                    "to_state": classified,
+                }
+            )
+            state = classified
+            candidate = None
+            candidate_start = None
+            candidate_count = 0
+
+    return transitions
+
+
+def _last_gripper_release_offsets(dataset, episodes, config):
+    action = _stack_action_column(dataset)
+    left_index = int(config.get("reward_left_gripper_index", 7))
+    right_index = int(config.get("reward_right_gripper_index", 15))
+    max_index = max(left_index, right_index)
+    if action.shape[1] <= max_index:
+        raise ValueError(
+            f"Action dim={action.shape[1]} cannot access reward gripper index {max_index}"
+        )
+
+    start_frames = int(config.get("reward_open_infer_frames", 5))
+    min_dwell = int(config.get("reward_min_dwell", 3))
+    expected_cycles = int(config.get("reward_expected_cycles", 1))
+    if start_frames < 1 or min_dwell < 1 or expected_cycles < 1:
+        raise ValueError(
+            "reward_open_infer_frames, reward_min_dwell, and "
+            "reward_expected_cycles must all be >= 1"
+        )
+
+    episode_frames = list(episodes.values())
+    left_thresholds = _infer_gripper_thresholds(
+        action[:, left_index],
+        episode_frames,
+        open_side=config.get("reward_left_open_side", "auto"),
+        start_frames=start_frames,
+        low_threshold=config.get("reward_left_low_threshold"),
+        high_threshold=config.get("reward_left_high_threshold"),
+    )
+    right_thresholds = _infer_gripper_thresholds(
+        action[:, right_index],
+        episode_frames,
+        open_side=config.get("reward_right_open_side", "auto"),
+        start_frames=start_frames,
+        low_threshold=config.get("reward_right_low_threshold"),
+        high_threshold=config.get("reward_right_high_threshold"),
+    )
+
+    release_offsets = {}
+    for episode_id, frames in episodes.items():
+        frame_array = np.asarray(frames, dtype=np.int64)
+        left_transitions = _debounced_gripper_transitions(
+            action[frame_array, left_index],
+            left_thresholds,
+            min_dwell,
+        )
+        right_transitions = _debounced_gripper_transitions(
+            action[frame_array, right_index],
+            right_thresholds,
+            min_dwell,
+        )
+        left_release = [
+            event["frame_offset"]
+            for event in left_transitions
+            if event["from_state"] == "closed" and event["to_state"] == "open"
+        ]
+        right_release = [
+            event["frame_offset"]
+            for event in right_transitions
+            if event["from_state"] == "closed" and event["to_state"] == "open"
+        ]
+        if len(left_release) != expected_cycles or len(right_release) != expected_cycles:
+            raise ValueError(
+                f"Episode {episode_id!r} reward event detection failed: "
+                f"left_release={left_release}, right_release={right_release}, "
+                f"expected_cycles={expected_cycles}"
+            )
+        reward_offset = max(left_release[-1], right_release[-1])
+        if reward_offset >= len(frames) - 1:
+            raise ValueError(
+                f"Episode {episode_id!r} final gripper release offset={reward_offset} "
+                f"must occur before recording end={len(frames) - 1}"
+            )
+        release_offsets[episode_id] = int(reward_offset)
+
+    metadata = {
+        "left_index": left_index,
+        "right_index": right_index,
+        "left_thresholds": left_thresholds,
+        "right_thresholds": right_thresholds,
+        "open_infer_frames": start_frames,
+        "min_dwell": min_dwell,
+        "expected_cycles": expected_cycles,
+    }
+    return release_offsets, metadata
+
+
+
 class _ZarrWriter:
     def __init__(
         self, path: Path, count: int, first: dict, jpeg_quality: int,
@@ -412,6 +651,7 @@ def convert_dataset(
     reward_json: str | Path | None = None, gamma: float = 0.99,
     jpeg_quality: int = 95, stream_batch_size: int = 32,
     source_path: str | Path | None = None,
+    reward_config: dict | None = None,
 ) -> Path:
     """Convert a local LeRobotDataset-like object; never overwrite output."""
     _require_zarr_v2()
@@ -419,11 +659,11 @@ def convert_dataset(
         raise ValueError("gamma must lie in (0,1]")
     if not 1 <= jpeg_quality <= 100 or stream_batch_size < 1:
         raise ValueError("Invalid JPEG quality or batch size")
-    if reward_mode not in {"recorded_sparse", "terminal_proxy"}:
+    if reward_mode not in {"recorded_sparse", "last_gripper_release_sparse", "terminal_proxy"}:
         raise ValueError("Unsupported reward mode")
     if reward_mode == "recorded_sparse" and reward_json is None:
         raise ValueError("recorded_sparse requires --reward-json")
-    if reward_mode == "terminal_proxy" and reward_json is not None:
+    if reward_mode != "recorded_sparse" and reward_json is not None:
         raise ValueError("Reward JSON requires recorded_sparse mode")
 
     output = Path(output).expanduser().resolve()
@@ -437,6 +677,16 @@ def convert_dataset(
         reward_offsets_from_json(Path(reward_json), episodes)
         if reward_json is not None else {}
     )
+    computed_metadata = None
+    if reward_mode == "last_gripper_release_sparse":
+        episode_indices = {
+            episode_id: list(range(start, end))
+            for episode_id, start, end in episodes
+        }
+        # Original kdc_ARBiM Reward V2 detector, not a new reward definition.
+        reward_offsets, computed_metadata = _last_gripper_release_offsets(
+            dataset, episode_indices, reward_config or {}
+        )
     # Original kdc_ARBiM batch decode; new LeRobot's private method moved
     # from the facade onto DatasetReader. Synthetic fixtures use item fallback.
     batch_decode = _can_batch_decode(dataset)
@@ -447,21 +697,27 @@ def convert_dataset(
         writer = _ZarrWriter(staging, total, first, jpeg_quality, stream_batch_size)
         writer.root.attrs.update({
             "reward_mode": (
-                "last_gripper_release_sparse"
-                if reward_mode == "recorded_sparse" else "terminal_proxy"
+                "terminal_proxy" if reward_mode == "terminal_proxy"
+                else "last_gripper_release_sparse"
             ),
             "reward_source": (
                 "recorded_validated" if reward_mode == "recorded_sparse"
+                else "computed_last_gripper_release"
+                if reward_mode == "last_gripper_release_sparse"
                 else "terminal_proxy_not_success_label"
             ),
-            "reward_validated": reward_mode == "recorded_sparse",
+            "reward_validated": reward_mode != "terminal_proxy",
             "reward_event": {
-                "source": "external_verified_episode_json",
+                "source": (
+                    "external_verified_episode_json" if reward_mode == "recorded_sparse"
+                    else "computed_last_gripper_release"
+                ),
+                "calibration": computed_metadata,
                 "episodes": [
                     {"episode_index": ep, "reward_offset": reward_offsets[ep]}
                     for ep, _, _ in episodes
                 ],
-            } if reward_mode == "recorded_sparse" else None,
+            } if reward_mode != "terminal_proxy" else None,
             "return_gamma": gamma,
             "source_manifest": [{
                 "kind": "lerobot",
@@ -496,7 +752,7 @@ def convert_dataset(
                     terminal = index == end - 1
                     reward = (
                         float(step == reward_offsets[episode_id])
-                        if reward_mode == "recorded_sparse" else float(terminal)
+                        if reward_mode != "terminal_proxy" else float(terminal)
                     )
                     episode_rewards.append(reward)
                     if pending is not None:
@@ -547,13 +803,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lerobot-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--reward-mode", choices=("recorded_sparse", "terminal_proxy"),
+    parser.add_argument("--reward-mode", choices=(
+        "recorded_sparse", "last_gripper_release_sparse", "terminal_proxy"
+    ),
                         default="recorded_sparse")
     parser.add_argument("--reward-json", type=Path)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     parser.add_argument("--stream-batch-size", type=int, default=32)
     parser.add_argument("--video-backend", default=None)
+    parser.add_argument("--reward-left-gripper-index", type=int, default=7)
+    parser.add_argument("--reward-right-gripper-index", type=int, default=15)
+    parser.add_argument("--reward-left-open-side", choices=("auto", "low", "high"), default="auto")
+    parser.add_argument("--reward-right-open-side", choices=("auto", "low", "high"), default="auto")
+    parser.add_argument("--reward-open-infer-frames", type=int, default=5)
+    parser.add_argument("--reward-min-dwell", type=int, default=3)
+    parser.add_argument("--reward-expected-cycles", type=int, default=1)
     args = parser.parse_args()
     root = args.lerobot_root.expanduser().resolve()
     if not (root / "meta" / "info.json").is_file():
@@ -569,6 +834,15 @@ def main() -> None:
         reward_json=args.reward_json, gamma=args.gamma,
         jpeg_quality=args.jpeg_quality,
         stream_batch_size=args.stream_batch_size, source_path=root,
+        reward_config={
+            "reward_left_gripper_index": args.reward_left_gripper_index,
+            "reward_right_gripper_index": args.reward_right_gripper_index,
+            "reward_left_open_side": args.reward_left_open_side,
+            "reward_right_open_side": args.reward_right_open_side,
+            "reward_open_infer_frames": args.reward_open_infer_frames,
+            "reward_min_dwell": args.reward_min_dwell,
+            "reward_expected_cycles": args.reward_expected_cycles,
+        },
     )
     print(f"[PASS] Created offline Zarr cache: {output}")
 
