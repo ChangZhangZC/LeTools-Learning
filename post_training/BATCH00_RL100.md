@@ -1,6 +1,6 @@
 # Batch 00 — RL-100 submodule and runtime smoke test
 
-Scope: integrate **unmodified** RL-100 as a pinned Git submodule, and verify basic imports and a synthetic 3-RGB RL1002D BC/prediction call. This batch does **not** implement dataset conversion, training, PPO or deployment.
+Scope: integrate **unmodified** RL-100 as a pinned Git submodule, then verify only the 2D RL1002D Actor path (3-RGB encoder, U-Net, DDIM, BC loss/backward, and action prediction). PPO, IQL and Dynamics are explicitly out of scope for Batch 00; they receive independent runtime checks in later batches.
 
 ## Pinned dependencies
 
@@ -27,9 +27,9 @@ python post_training/tests/smoke/smoke_00_rl100_runtime.py --level forward --dev
 
 If running on a work branch before integration, replace `feature/rl100-submodule` with `gpt/rl100-import-smoke`.
 
-The `imports` level checks RL1002D, MultiImageObsEncoder, custom DDIM scheduler, PPO, critic, and transition dynamics imports. It also asserts they come from **this** checkout, not a different installed RL-100 package.
+The `imports` level checks RL1002D, MultiImageObsEncoder, both 1D Conditional U-Nets and the custom DDIM scheduler. It asserts that these modules load from **this** checkout, not another installed RL-100 package. Because upstream RL1002D imports Critic at module import time, this still indirectly requires the legacy `gym` package, but no RL-100 Gym/MuJoCo rollout is executed.
 
-The `forward` level additionally constructs an **untrained synthetic** RL1002D (3 RGB at 84×84, 16D robot state/action, 2 observation steps, 9-step training horizon, 4-step output chunk), checks finite BC loss/gradient and predicted action shape `[1,4,16]`.
+The `forward` level additionally constructs an **untrained synthetic** RL1002D (3 RGB at 84×84, 16D robot state/action, 2 observation steps, 9-step training horizon, 4-step output chunk), checks finite BC loss, both the U-Net and ResNet encoder gradients, and predicted action shape `[1,4,16]`.
 
 The synthetic configuration intentionally uses a small U-Net, shared ResNet18 without downloaded pretrained weights, and `action_norm=False` for an isolated smoke test. **It must not be reused as an actual Kuavo training configuration.** Real image dimensions, state/action DOF, image transforms, normalizer and execution timing belong to later batches.
 
@@ -78,8 +78,8 @@ Do **not** blindly merge both projects' complete requirements into one environme
 
 1. `.gitmodules` and the gitlink `third_party/rl100` reference the exact pinned commit.
 2. Existing LeRobot gitlink remains unchanged.
-3. The import smoke passes on the chosen training machine.
-4. Synthetic 3-RGB RL1002D BC loss, backward and deterministic prediction pass.
+3. The 2D Actor import smoke passes on the chosen training machine. This does not validate PPO/IQL/Dynamics.
+4. Synthetic 3-RGB RL1002D BC loss, encoder/U-Net backward and deterministic prediction pass.
 5. Only after #3 and #4 have been confirmed should Batch 00 be merged from `feature/rl100-submodule` to `arbim/dev`.
 
 Record run logs and environment versions before promotion. Git and Python syntax checks alone are **not** sufficient for runtime acceptance.
