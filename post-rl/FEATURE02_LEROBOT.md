@@ -58,8 +58,14 @@ PYTHONPATH=post-rl/src python -m unittest discover \
 
 python post-rl/test/smoke_lerobot_real.py \
   --repo-id local/kuavo_example --root /path/to/lerobot \
-  --n-obs-steps 2 --horizon 5
+  --n-obs-steps 2 --horizon 5 --video-backend pyav
 ```
+
+If TorchCodec reports `Could not load libtorchcodec` (shared-library or
+PyTorch ABI mismatch), use the official LeRobot `--video-backend pyav` decoder
+instead of changing Torch, CUDA, or RL100 source. The smoke script forwards
+this choice to `LeRobotDataset(..., video_backend=...)`; the data adapter
+already exposes that argument. PyAV may be slower on large videos.
 
 The second command requires a **real** locally generated LeRobot v3 dataset.
 Test metadata, shapes and episode boundary flags first; this feature does

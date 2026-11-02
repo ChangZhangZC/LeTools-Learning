@@ -18,11 +18,16 @@ def main() -> None:
     parser.add_argument("--n-obs-steps", type=int, default=2)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument(
+        "--video-backend", choices=("torchcodec", "pyav", "video_reader"),
+        default=None, help="LeRobot video decoder; try pyav if TorchCodec binaries fail",
+    )
     args = parser.parse_args()
 
     view = open_lerobot_bc_dataset(
         args.repo_id, args.root,
-        n_obs_steps=args.n_obs_steps, horizon=args.horizon
+        n_obs_steps=args.n_obs_steps, horizon=args.horizon,
+        video_backend=args.video_backend,
     )
     print(f"Frames: {len(view)}; FPS: {view.dataset.fps}")
     print(f"State dim: {view.contract.state_dim}; Action dim: {view.contract.action_dim}")
