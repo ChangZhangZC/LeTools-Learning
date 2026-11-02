@@ -63,6 +63,11 @@ whether LeRobot-native training management is acceptable or an
 adapter must explicitly preserve the original EMA/TopK semantics.
 Do not silently conflate these implementations.
 
+LeRobot's `EpisodeAwareSampler` is enabled by
+`policy.drop_n_last_frames=7` for the example `horizon=9`,
+`n_obs_steps=2` to avoid future-action padding at episode ends.
+This is the dataset-windowing contract, not a new Zarr sequence sampler.
+
 The initial plugin config defaults are close to RL-100 2D U-Net
 sizes, but omit original experimental variants such as VIB/recon
 and R3M downloads unless explicitly enabled. Reproduction requires
@@ -107,8 +112,10 @@ experiments. Validate both loss/grad and LeRobot model
 
 `post_training/src/arbim_rl100/train_bc.py` is the **legacy Batch 02
 diagnostic**, saved previously in `arbim/dev` and reliant on Zarr.
-**Do not use it to train BC going forward.** It should be retired after
-this replacement has passed real LeRobot training and checkpoint tests.
+**Its command-line entrypoint is disabled on this feature-development
+branch.** The historical functions are retained only to audit previous
+experiment checkpoints and migration history; they are not a supported BC
+training route. Zarr remains exclusive to RL post-training.
 The old diagnostic's success was evidence of RL1002D compute-loss
 compatibility only, never evidence of the final data architecture.
 
