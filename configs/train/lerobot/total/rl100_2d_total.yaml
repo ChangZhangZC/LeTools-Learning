@@ -1,0 +1,92 @@
+# Complete LeRobot / LeTools training settings for the native RL-100 2D plugin.
+# Uses LeRobotDataset and its delta-timestamp action/observation windows.
+# Zarr is reserved for later RL post-training only.
+dataset:
+  repo_id: "lerobot/your_dataset"
+  root: null
+  video_backend: pyav
+  episodes: null
+  image_transforms: {}
+  revision: null
+  use_imagenet_stats: false  # Native RL-100 RGB encoder handles ImageNet normalization.
+  return_uint8: true
+  streaming: false
+
+training:
+  output_dir: "outputs/train/rl100_2d"
+  job_name: "rl100_2d"
+  resume: false
+  seed: 42
+  cudnn_deterministic: true
+  num_workers: 2
+  batch_size: 4
+  prefetch_factor: 2
+  persistent_workers: false
+  steps: 100000
+  eval_freq: 0
+  log_freq: 50
+  tolerance_s: 0.0001
+  save_checkpoint: true
+  save_freq: 10000
+  use_policy_training_preset: true
+  optimizer: null
+  scheduler: null
+
+eval:
+  n_episodes: 0
+  batch_size: 0
+  use_async_envs: false
+
+wandb:
+  enable: false
+  disable_artifact: true
+  project: "rl100_2d_bc"
+  entity: null
+  notes: null
+  run_id: null
+  mode: null
+  add_tags: true
+
+peft: null
+
+policy:
+  type: rl100_2d
+  n_obs_steps: 2
+  input_features: {}
+  output_features: {}
+  device: "cuda:0"
+  use_amp: false
+  push_to_hub: false
+  repo_id: null
+  pretrained_path: null
+  horizon: 9
+  n_action_steps: 4
+  # LeRobot processor is IDENTITY; raw RGB scaled [0,1] by LeRobot trainer.
+  # Native RL-100 LinearNormalizer fits state/action from dataset stats.
+  normalization_mapping:
+    VISUAL: IDENTITY
+    STATE: IDENTITY
+    ACTION: IDENTITY
+  resize: 224
+  down_dims: [256, 512, 1024]
+  diffusion_step_embed_dim: 256
+  num_train_timesteps: 100
+  num_inference_steps: 10
+  share_rgb_model: false
+  use_group_norm: true
+  resnet_weights: null
+  use_aug: false
+  use_recon: false
+  use_vib: false
+  action_norm: true
+  kernel_size: 5
+  n_groups: 8
+  beta_schedule: "squaredcos_cap_v2"
+  prediction_type: "epsilon"
+  clip_std_min: 0.0067
+  native_stats: {}
+  optimizer_lr: 0.0001
+  optimizer_betas: [0.95, 0.999]
+  optimizer_eps: 1.0e-8
+  optimizer_weight_decay: 1.0e-6
+  scheduler_warmup_steps: 500
