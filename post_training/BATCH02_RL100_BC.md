@@ -100,11 +100,13 @@ training run, set `training.max_train_steps_per_epoch: null`,
 increase `training.epochs`, restore appropriate learning-rate
 warmup, and leave other original RL-100 behavior unchanged.
 
-## Multi-epoch Resume hardening (development; pending server acceptance)
+## Multi-epoch Resume hardening (server acceptance passed)
 
 **Development branch:** `gpt/rl100-il-resume`, fast-forwarded into
 `feature/rl100-il` as the **feature integration/testing branch**.
-The multi-epoch resume regression remains **unverified on the server**.
+The multi-epoch resume regression **passed on the server**:
+`epoch=2`, `global_step=4`; model, normalizer, optimizer,
+scheduler, EMA, RNG and counters match the uninterrupted run exactly.
 Only after all IL functionality is validated may `feature/rl100-il`
 be **Squash Merged** into `arbim/dev`. No direct `gpt/**` → dev merge.
 
@@ -211,7 +213,9 @@ The updated `smoke_02_bc_checkpoint.py` now checks both normalizers'
 devices **and computes native BC loss after reload**; testing
 `predict_action()` alone was insufficient to detect this failure.
 
-This fix is **not yet verified on the server**. The saved epoch-1
+This fix **passed server verification**, including checking model/EMA
+normalizers' target-device placement and computing the native BC loss
+after restoring the checkpoint. The saved epoch-1
 checkpoint from the failed attempt remains usable: the exception
 happened before any optimizer step or checkpoint replacement.
 After updating the feature branch:
@@ -243,14 +247,82 @@ python post_training/tests/smoke/smoke_02_bc_resume_compare.py \
   --resumed outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
 ```
 
+## Stable validation and best-checkpoint selection (pending server test)
+
+Development: `gpt/rl100-il-validation` → `feature/rl100-il`
+**after code review**; do not Squash Merge into `arbim/dev`
+until feature acceptance is complete.
+
+Pooled BC validation uses the original `RL1002D.compute_loss()`,
+without changing the policy or converting validation loss into a task
+success score. Diffusion `compute_loss()` samples noise/timesteps,
+so a different random draw each epoch adds noise to model comparisons.
+The BC-only orchestrator now encloses the validation loader/forward
+pass in `torch.random.fork_rng()` and seeds it with
+`data.seed + 1000003`. This fixes validation sampling across epochs
+**without consuming training RNG state** and preserves deterministic
+Resume behavior. Val split is still episode-level and no validation
+frames are used for normalizer fitting.
+
+- Record `train_loss`, `val_loss`, `best_val_loss`, `lr`,
+  `global_step`, `epoch` in `output.dir/metrics.jsonl`.
+- `checkpoints/latest.ckpt` is written **each completed epoch**,
+  atomically, for safe epoch-boundary resume. Currently only
+  `training.checkpoint_every=1` is supported (explicit error otherwise).
+- `checkpoints/best.ckpt` is written atomically when deterministic
+  held-out `val_loss` improves strictly. It retains the same native
+  actor, EMA, optimizer, scheduler and normalizer states as the other
+  BC-only checkpoints. The best value is also saved in
+  `pickles.best_val_loss` for consistent Resume selection.
+- Best BC loss is a supervised reconstruction/diffusion-noise metric,
+  **not** task success, and `best.ckpt` is **not** evidence of real robot
+  policy quality.
+
+### Run a small validation trial on the real 10-bag cache
+
+This `rl100_2d_bc_validation_trial.yaml` is a **functionality test**:
+3 epochs × 12 optimizer steps, batch size 4, full validation windows,
+warmup 10, 84×84 resized RGB. This is **not** the final IL recipe
+and the 10-episode dataset is far too small for robust robot-task
+performance conclusions. Do not change the existing validated
+one-step and resume configs.
+
+```bash
+conda activate letools_chang
+git fetch origin
+git switch feature/rl100-il
+git pull --ff-only origin feature/rl100-il
+
+python post_training/src/arbim_rl100/train_bc.py \
+  --config post_training/configs/bc/rl100_2d_bc_validation_trial.yaml
+
+python post_training/tests/smoke/smoke_02_bc_best.py \
+  --output-dir outputs/train/rl100_bc_validation_trial
+```
+
+The existing 2-epoch exact Resume acceptance can be repeated on fresh
+output directories with the new metric/best code, and
+`smoke_02_bc_resume_compare.py` now also compares saved
+`best.ckpt` states and per-epoch `metrics.jsonl`. Do not overwrite
+the user's earlier acceptance checkpoints; use fresh
+`--output-dir` for regressions.
+
+**Gates before claiming production IL readiness:** the validation
+trial must pass; data scale/train-val split, model resolution,
+`max_train_steps_per_epoch`, action horizon and inference settings
+must be separately selected for the actual IL experiment, and a
+MuJoCo/Kuavo rollout benchmark must establish execution success.
+The old `terminal_proxy` cache is acceptable for BC-only training,
+not for PPO rewards.
+
 ## Acceptance and branch lifecycle
 
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
 2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
 3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
-4. The validated one-step capability and unvalidated multi-epoch
-   resume implementation are now integrated into `feature/rl100-il`.
-   The latter still **must pass server tests** before IL is accepted.
+4. Both the one-step BC trainer and exact multi-epoch resume passed
+   server tests on the 10-episode data cache. The new validation and
+   best-checkpoint capability below still requires server acceptance.
    When all IL requirements are validated, **Squash Merge**
    `feature/rl100-il` → `arbim/dev`; never merge `gpt/**` directly.
    PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
