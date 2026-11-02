@@ -26,3 +26,8 @@ numcodecs==0.15.1
 # Imported by rl_100.policy.rl100_2d for debug plots / image visualization.
 # Python 3.12 compatible range; pin the tested server version in a later lockfile.
 matplotlib>=3.8,<4
+
+# Original kdc_ARBiM SequenceSampler uses @numba.jit for episode-safe indices.
+# Numba 0.61.2+ supports Python 3.12 and NumPy 2.2; <0.63 bounds this
+# migration's initial compatibility range (exact server version to be locked).
+numba>=0.61.2,<0.63
