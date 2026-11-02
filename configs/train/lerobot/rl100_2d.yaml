@@ -26,6 +26,7 @@ policy:
   n_obs_steps: 2
   horizon: 9
   n_action_steps: 4
+  drop_n_last_frames: 7  # Avoid future-action padding across episode ends
   # Original RL-100 actor, full-sized UNet. Small smoke override: [32,64,128].
   down_dims: [256, 512, 1024]
   diffusion_step_embed_dim: 256
