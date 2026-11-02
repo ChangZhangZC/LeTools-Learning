@@ -183,6 +183,66 @@ If exact comparison fails, retain both checkpoints and logs; diagnose
 the first mismatching field before adjusting any RL-100 upstream code.
 Never treat a 2-epoch / 4-update smoke as successful IL convergence.
 
+## Resume bug: custom RL-100 Normalizer device after CPU checkpoint load
+
+**Observed:** interrupted training saved `epoch=1, global_step=2`
+and `EMA step=2`; after loading on `cuda:0`, the next
+`RL1002D.compute_loss()` failed on
+`noisy_trajectory[condition_mask] = cond_data[condition_mask]` with
+CPU/CUDA index mismatch. This occurred **after** successful strict
+weights and optimizer/scheduler restoration.
+
+**Source-based root cause:** The pinned
+`rl_100.model.common.dict_of_tensor_mixin.DictOfTensorMixin._load_from_state_dict()`
+reconstructs `self.params_dict` directly using tensors provided
+by `torch.load(map_location="cpu")`. It does **not** preserve the
+GPU placement of the previously fitted normalizer parameters.
+`rl_100.model.common.normalizer._normalize()` moves action tensors
+to `scale.device`, so restored actions become CPU tensors while
+`LowdimMaskGenerator` stays on the model GPU.
+
+**Minimal remedy outside upstream** in `load_checkpoint()`: after
+each strict `model.load_state_dict()` / `ema_model.load_state_dict()`,
+move that entire model back to the previously selected device;
+restore AdamW state after the actor's device move.
+Keep native RL1002D `compute_loss()`, mask generator,
+normalization math, EMA and PPO code unchanged.
+The updated `smoke_02_bc_checkpoint.py` now checks both normalizers'
+devices **and computes native BC loss after reload**; testing
+`predict_action()` alone was insufficient to detect this failure.
+
+This fix is **not yet verified on the server**. The saved epoch-1
+checkpoint from the failed attempt remains usable: the exception
+happened before any optimizer step or checkpoint replacement.
+After updating the feature branch:
+
+```bash
+# Run from repo root in letools_chang.
+git fetch origin
+git switch feature/rl100-il
+git pull --ff-only origin feature/rl100-il
+
+# First check the previously failing epoch-1 checkpoint independently.
+python post_training/tests/smoke/smoke_02_bc_checkpoint.py \
+  --checkpoint outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt \
+  --device cuda:0 --expected-epoch 1 --expected-step 2
+
+# Continue epoch 1 (zero-indexed); no need to repeat earlier updates.
+python post_training/src/arbim_rl100/train_bc.py \
+  --config post_training/configs/bc/rl100_2d_bc_resume_smoke.yaml \
+  --output-dir outputs/train/rl100_bc_resumed \
+  --resume outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
+
+python post_training/tests/smoke/smoke_02_bc_checkpoint.py \
+  --checkpoint outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt \
+  --device cuda:0 --expected-epoch 2 --expected-step 4
+
+# If uninterrupted run was already completed, compare them:
+python post_training/tests/smoke/smoke_02_bc_resume_compare.py \
+  --continuous outputs/train/rl100_bc_continuous/checkpoints/latest.ckpt \
+  --resumed outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
+```
+
 ## Acceptance and branch lifecycle
 
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
