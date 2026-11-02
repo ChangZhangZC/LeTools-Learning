@@ -146,6 +146,69 @@ class LeRobotToZarrTest(unittest.TestCase):
         root = zarr.open_group(str(output), mode="r")
         self.assertEqual(root["meta"]["episode_ends"][:].tolist(), [3, 5])
 
+    def test_original_shaped_reward_mode(self):
+        dataset = _Dataset()
+        out = convert_dataset(
+            dataset, self.path / "shaped.zarr",
+            reward_mode="episode_end_shaped",
+            reward_config={"lambda_penalty": 0.05, "smooth_penalty": 0.0, "max_episode_len": 2000},
+        )
+        root = zarr.open_group(str(out), mode="r")
+        self.assertEqual(root.attrs["reward_mode"], "episode_end_shaped")
+        self.assertFalse(root.attrs["reward_validated"])
+        actual = root["data"]["reward"][:, 0]
+        expected = [0, 0, 1 - 0.05 * 3 / 2000, 0, 1 - 0.05 * 2 / 2000]
+        np.testing.assert_allclose(actual, expected, rtol=1e-5)
+
+    def test_original_recorded_and_computed_reward_mixing(self):
+        dataset = _Dataset(episodes=[0] * 12 + [1] * 12)
+        for index, frame in enumerate(dataset.frames):
+            action = torch.zeros(16, dtype=torch.float32)
+            if 3 <= (index % 12) < 7:
+                action[7] = action[15] = 1.0
+            frame["action"] = action
+        source = self.path / "lerobot_source"
+        meta = source / "meta"
+        meta.mkdir(parents=True)
+        manifest = {
+            "format": "arbim_lerobot_staging_provenance_v1",
+            "episodes": [
+                {
+                    "lerobot_episode_index": 0, "num_frames": 12,
+                    "reward_mode": "last_gripper_release_sparse",
+                    "reward_status": "valid",
+                    "reward_index": 5, "reward_event": {"frame_offset": 5},
+                },
+                {
+                    "lerobot_episode_index": 1, "num_frames": 12,
+                    "reward_mode": "last_gripper_release_sparse",
+                    "reward_status": "valid",
+                    "reward_index": 7, "reward_event": {"frame_offset": 7},
+                },
+            ],
+        }
+        (meta / "arbim_staging_provenance.json").write_text(json.dumps(manifest))
+        out = convert_dataset(
+            dataset, self.path / "recorded.zarr",
+            reward_mode="last_gripper_release_sparse", source_path=source,
+        )
+        root = zarr.open_group(str(out), mode="r")
+        self.assertEqual(root.attrs["reward_source"], "staging_recorded_v1")
+        np.testing.assert_array_equal(
+            root["data"]["reward"][:, 0][[5, 19]], [1, 1]
+        )
+        self.assertEqual(int(np.count_nonzero(root["data"]["reward"][:])), 2)
+
+        manifest["episodes"][1]["reward_status"] = "invalid"
+        manifest["episodes"][1]["reward_index"] = None
+        manifest["episodes"][1]["reward_event"] = None
+        (meta / "arbim_staging_provenance.json").write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "invalid recorded Reward V2"):
+            convert_dataset(
+                dataset, self.path / "bad_recorded.zarr",
+                reward_mode="last_gripper_release_sparse", source_path=source,
+            )
+
     def test_reject_zarr3_with_actionable_error(self):
         from unittest.mock import patch
 
