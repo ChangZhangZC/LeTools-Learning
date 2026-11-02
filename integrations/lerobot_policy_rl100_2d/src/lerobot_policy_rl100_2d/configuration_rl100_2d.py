@@ -17,6 +17,9 @@ class RL1002DConfig(PreTrainedConfig):
     n_obs_steps: int = 2
     horizon: int = 9
     n_action_steps: int = 4
+    # LeRobot EpisodeAwareSampler drops trailing frames whose future action
+    # window would cross the episode boundary (9 - 2 = 7 by default).
+    drop_n_last_frames: int = 7
     # Keep native RL-100 scale: data statistics are fitted into its internal
     # LinearNormalizer, not normalized by LeRobot a second time.
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -61,6 +64,8 @@ class RL1002DConfig(PreTrainedConfig):
             raise ValueError("action chunk exceeds horizon")
         if self.resize <= 0 or not self.down_dims:
             raise ValueError("resize and down_dims must be positive")
+        if not 0 <= self.drop_n_last_frames < self.horizon:
+            raise ValueError("drop_n_last_frames must be in [0, horizon)")
 
     @property
     def observation_delta_indices(self) -> list[int]:
