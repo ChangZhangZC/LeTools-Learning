@@ -323,15 +323,49 @@ MuJoCo/Kuavo rollout benchmark must establish execution success.
 The old `terminal_proxy` cache is acceptable for BC-only training,
 not for PPO rewards.
 
+## Final Batch 02 functional acceptance (server-verified)
+
+The server ran the current Validation/Best Checkpoint implementation
+through both uninterrupted training and an epoch-boundary interrupted
+resume. The *new* two-epoch regression finished with four total
+optimizer updates, successfully restored epoch 1 / global_step 2 /
+EMA step 2, and reported:
+
+```text
+[PASS] Uninterrupted and epoch-boundary-resumed BC states match exactly
+[PASS] Model, normalizer, optimizer, scheduler, EMA, step counters and RNG match
+```
+
+The improved first-epoch Validation Loss was 1.0631674528121948
+and second-epoch Validation Loss was 1.0679855346679688,
+so `best.ckpt` correctly remained at epoch 1. The comparison
+script also checks `best.ckpt` and `metrics.jsonl` when present.
+
+**Acceptance interpretation:** The native RL1002D *BC training
+infrastructure* is functionally complete for this Batch 02 scope:
+real Zarr input, gradient/optimizer update, per-epoch Validation,
+training/EMA weights, Checkpoint Save/Load, best-validation selection,
+and exact epoch-boundary Resume. These tests used the short 10-episode
+data cache. They do **not** validate a production-trained policy,
+full RL-100 training hyperparameters, simulator/robot task success,
+or offline/online RL algorithms. Deployment and task-success
+evaluation remain a separate Batch 03 feature.
+
+**Branch policy:** feature `feature/rl100-il` may now be
+Squash Merged to `arbim/dev` as a finished *training-infrastructure*
+feature. Individual development branches are never merged directly
+into dev.
+
 ## Acceptance and branch lifecycle
 
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
 2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
 3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
-4. One-step BC, exact multi-epoch Resume, and the new three-epoch
-   Validation/Best-Checkpoint trial **passed server tests**. The
-   combined new-validation + resumed-training equality regression
-   remains to be rechecked on fresh outputs. Once IL functionality
-   is fully accepted, **Squash Merge**
+4. One-step BC, exact multi-epoch Resume, the three-epoch
+   Validation/Best-Checkpoint trial, and the combined
+   new-validation + interrupted/resumed-training equality regression
+   **all passed server tests**. The Batch 02 training infrastructure
+   is accepted for **Squash Merge**:
    `feature/rl100-il` → `arbim/dev`; never merge `gpt/**` directly.
-   PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
+   Production model quality, MuJoCo execution, PPO/IQL/Dynamics and
+   online robot rollout remain separate feature scopes.
