@@ -113,6 +113,29 @@ change only establishes the local directory contract; it does not
 copy files from the user's server automatically. Existing valid
 `outputs/test/*.zarr` may be moved to `data/zarr/` after verification.
 
+## Video decoding on the Python 3.12 / PyTorch 2.9.1 server
+
+The pinned LeRobot reader supports `video_backend="pyav"` directly.
+When the default TorchCodec backend fails to load with missing
+`libavutil.so.*` or an undefined PyTorch C++ symbol, **do not change
+LeRobot or RL-100 source code**. Select the existing PyAV backend:
+
+```bash
+python post_training/src/arbim_rl100/data/lerobot_to_zarr.py \
+  --lerobot-root data/lerobot/icra_task1_10bags \
+  --output data/zarr/icra_task1_10bags.zarr \
+  --reward-mode terminal_proxy \
+  --video-backend pyav \
+  --stream-batch-size 32
+```
+
+The `terminal_proxy` setting remains for **format/BC smoke tests only**,
+not offline reward-based training. PyAV must be importable; it is an
+existing LeRobot video dependency. This backend selection is not a
+fix for broken TorchCodec binaries and does not imply any source changes.
+Real-data conversion is not verified until this command completes on
+the server.
+
 ## Run on the server
 
 ```bash
