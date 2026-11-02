@@ -194,7 +194,12 @@ def _batch_column(dataset, key, indices):
     except (KeyError, TypeError, IndexError):
         values = hf_dataset[indices][key]
     if not isinstance(values, (list, tuple)):
-        values = [values]
+        # LeRobot 0.5.x can return a stacked tensor/ndarray for fancy indexing,
+        # unlike the list-of-frames returned by the older ARBiM dataset view.
+        if getattr(values, "ndim", 0) >= 1 and len(values) == len(indices):
+            values = [values[i] for i in range(len(indices))]
+        else:
+            values = [values]
     return values
 
 
