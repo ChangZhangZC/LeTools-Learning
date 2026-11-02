@@ -232,6 +232,46 @@ work branch to `feature/rl100-data` or `arbim/dev` until the expanded
 synthetic tests and a short genuine LeRobot conversion run pass, and the
 original `jpeg_bytes_v1` payload can be read by OfflineBuffer.
 
+## Batch 01D — native RL1002D constructor compatibility (pending server validation)
+
+Real LeRobot video conversion **passed on the user's server** with
+`--video-backend pyav`: 1,482 frames / 10 episodes; 1,120 training and
+282 validation windows; native `LinearNormalizer.fit()` used 1,184
+training-only frames. The subsequent BC smoke stopped in the *pinned
+RL-100 constructor*, before loss or gradient calculation:
+
+```python
+# third_party/rl100/RL-100/rl_100/policy/rl100_2d.py
+obs_dict = dict_apply(obs_shape_meta, lambda x: x["shape"])
+```
+
+Its upstream `dict_apply` recursively descends into ordinary `dict`
+feature specifications and then attempts to subscript the leaf
+shape `list` with the string `"shape"`, raising `TypeError`.
+
+**No upstream edits or runtime monkey-patching.** Existing
+`batch_adapter.py` now exposes `adapt_rl100_shape_meta()`,
+using stdlib picklable `collections.UserDict` to keep feature
+specifications as non-`dict` Mapping leaves. The shape, type, original
+input metadata and RL1002D mathematics remain unchanged. Both Batch 00
+forward smoke and Batch 01D real Zarr smoke apply this adaptation.
+
+**Tests to run in the same environment after pulling:**
+
+```bash
+python post_training/tests/smoke/smoke_01_rl100_batch_contract.py
+python post_training/tests/smoke/smoke_00_rl100_runtime.py --level forward --device cuda:0
+python post_training/tests/smoke/smoke_01_real_bc.py \
+  --zarr data/zarr/icra_task1_10bags_parity.zarr --device cuda:0
+```
+
+The previous Batch 00 default `--level imports` checks imports
+only, **not** constructor/forward or Backward; do not infer forward
+success from the import-only test. Real-data normalization success
+does not yet prove BC Loss or Backward. Separately inspect the
+server-local `M third_party/rl100` submodule before deciding whether
+any local upstream modifications need retaining.
+
 ## Remaining Batch 01 work
 
 1. `gpt/rl100-data-source-parity`: review-phase port restores old batch decoder, computed/recorded Reward V2, optional Depth and progress; expanded tests and real-data performance/contract validation still pending. See `LEROBOT_TO_ZARR_RL100.md`.
