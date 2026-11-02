@@ -68,6 +68,26 @@ python post_training/tests/smoke/smoke_00_rl100_runtime.py --level imports
 
 **Compatibility limit:** gym 0.26 changed the reset/step API from RL-100's legacy environment assumptions. This fixes the import dependency only; it does not validate RL-100's original Gym environments or online rollout. Online training must use an adapted, tested environment contract. Avoid downgrading LeTools' existing Gymnasium or NumPy just to satisfy this import.
 
+### Zarr 2.x dependency
+
+The pinned RL-100 `LinearNormalizer` imports `zarr` and uses `zarr.Array`; the later offline RL data pipeline also expects Zarr v2 APIs. In our Python 3.12 environment, the incremental requirements select:
+
+```text
+zarr==2.18.7
+numcodecs==0.15.1
+```
+
+Install only the newly discovered requirements after PyTorch3D and Gym are already working; avoid rebuilding PyTorch3D on every import failure:
+
+```bash
+python -m pip install "zarr==2.18.7" "numcodecs==0.15.1"
+python -c "import zarr, numcodecs; print('zarr', zarr.__version__, 'numcodecs', numcodecs.__version__)"
+python -m pip check
+python post_training/tests/smoke/smoke_00_rl100_runtime.py --level imports
+```
+
+Zarr 2.x and Numcodecs >=0.16 had an import incompatibility involving `cbuffer_sizes`; the second pin prevents that known issue. Neither import success nor `pip check` alone proves the later data pipeline correct.
+
 ## Environment compatibility gate
 
 LeTools' currently pinned LeRobot version is not the same as RL-100's documented environment. In particular, `pytorch3d.ops` is imported unconditionally by `rl100_2d.py`, even for 2D-only use. Do not assume successful git submodule initialization implies import or forward compatibility.
