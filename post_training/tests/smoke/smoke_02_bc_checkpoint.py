@@ -74,6 +74,14 @@ def main():
     epoch, global_step = load_checkpoint(
         args.checkpoint, model, optimizer, ema_model, scheduler
     )
+    # RL-100's custom normalizer loader reconstructs ParameterDicts from CPU
+    # tensors; verify that load_checkpoint puts both normalizers on target.
+    for name, current in (("model", model), ("EMA", ema_model)):
+        norm_devices = {p.device for p in current.normalizer.parameters()}
+        if norm_devices != {device}:
+            raise AssertionError(
+                f"{name} normalizer device mismatch after restore: {norm_devices} != {device}"
+            )
     if epoch != args.expected_epoch or global_step != args.expected_step:
         raise AssertionError(
             f"Expected epoch={args.expected_epoch}, step={args.expected_step}, "
@@ -96,11 +104,17 @@ def main():
     sample = next(iter(DataLoader(data, batch_size=1, shuffle=False, num_workers=0)))
     batch = bc_batch(sample, int(config.data.n_obs_steps), device)
     with torch.no_grad():
+        # A forward prediction alone cannot catch CPU action normalization:
+        # compute_loss explicitly indexes the normalized action on GPU.
+        loss, _ = model.compute_loss(batch)
+        if not torch.isfinite(loss).all():
+            raise AssertionError(f"Non-finite restored native BC loss: {loss.item()}")
         action = model.predict_action(batch["obs"], deterministic=True)["action"]
     expected_shape = (1, int(config.data.n_action_steps), int(buffer["action"].shape[-1]))
     if tuple(action.shape) != expected_shape or not torch.isfinite(action).all():
         raise AssertionError(f"Invalid restored Action Chunk: {tuple(action.shape)}")
     print(f"[PASS] checkpoint epoch={epoch}, global_step={global_step}")
+    print("[PASS] native BC loss after reload, model+EMA normalizers on target device")
     print("[PASS] strict RL1002D/Normalizer/EMA weights, optimizer and scheduler restored")
     print(f"[PASS] restored Action Chunk={tuple(action.shape)}")
 
