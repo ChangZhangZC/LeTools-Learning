@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
 from arbim_rl100.data.offline_buffer import OfflineBuffer
 from arbim_rl100.data.offline_dataset import OfflineDataset
 from arbim_rl100.train_bc import (
-    bc_batch, build_policy, load_checkpoint, shape_meta_from_buffer,
+    bc_batch, build_policy, fit_train_normalizer, load_checkpoint, shape_meta_from_buffer,
 )
 from rl_100.model.common.lr_scheduler import get_scheduler
 
@@ -49,7 +49,11 @@ def main():
         val_ratio=float(config.data.val_ratio),
     )
     device = torch.device(args.device)
-    model = build_policy(config, shape_meta_from_buffer(buffer)).to(device)
+    model = build_policy(config, shape_meta_from_buffer(buffer))
+    # RL-100 LinearNormalizer adds registered per-field parameters on fit.
+    # Initialize identical structure before strict checkpoint state_dict loading.
+    model.set_normalizer(fit_train_normalizer(buffer, data.train_mask))
+    model.to(device)
     ema_model = copy.deepcopy(model)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(config.training.lr),
