@@ -238,6 +238,18 @@ def _frame(raw: dict, state_dim=None, action_dim=None, rgb_shapes=None) -> dict:
     return result
 
 
+def _require_zarr_v2() -> None:
+    """This cache contract uses Zarr 2's create_dataset and Blosc APIs."""
+    version = getattr(zarr, "__version__", "unknown")
+    if version.split(".", 1)[0] != "2" or not hasattr(zarr.group(), "create_dataset"):
+        raise RuntimeError(
+            f"ARBiM jpeg_bytes_v1 converter requires zarr==2.18.7 "
+            f"(installed: {version}; module: {getattr(zarr, '__file__', '?')}). "
+            "Install with: python -m pip install 'zarr==2.18.7' "
+            "'numcodecs==0.15.1'"
+        )
+
+
 def convert_dataset(
     dataset: Any, output: str | Path, *, reward_mode: str = "recorded_sparse",
     reward_json: str | Path | None = None, gamma: float = 0.99,
@@ -245,6 +257,7 @@ def convert_dataset(
     source_path: str | Path | None = None,
 ) -> Path:
     """Convert a local LeRobotDataset-like object; never overwrite output."""
+    _require_zarr_v2()
     if not (0 < gamma <= 1):
         raise ValueError("gamma must lie in (0,1]")
     if not 1 <= jpeg_quality <= 100 or stream_batch_size < 1:
