@@ -12,13 +12,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RL100_ROOT = REPO_ROOT / "third_party" / "rl100" / "RL-100"
+# Batch 00 tests only the 2D Actor path. PPO/IQL/Dynamics will be tested
+# independently in later batches. RL1002D itself still has indirect imports.
 MODULES = (
     "rl_100.policy.rl100_2d",
     "rl_100.model.vision.multi_image_obs_encoder",
+    "rl_100.model.diffusion.simple_conditional_unet1d",
+    "rl_100.model.diffusion.conditional_unet1d",
     "rl_100.unidpg.diffusion_policy.diffusers_patch.ddim_with_logprob_dpok",
-    "rl_100.unidpg.uni_ppo",
-    "rl_100.unidpg.critic",
-    "rl_100.unidpg.transition_model.dynamics.ensemble_dynamics",
 )
 
 
@@ -121,12 +122,15 @@ def check_forward(device_name: str) -> None:
     if loss.ndim != 0 or not torch.isfinite(loss):
         raise AssertionError(f"Non-finite BC loss: {loss}")
     loss.backward()
-    if not any(
-        p.grad is not None and torch.isfinite(p.grad).all()
-        for p in policy.model.parameters()
+    for component, parameters in (
+        ("U-Net", policy.model.parameters()),
+        ("3-RGB encoder", policy.obs_encoder.parameters()),
     ):
-        raise AssertionError("No finite U-Net parameter gradient")
-    print(f"[PASS] BC loss/backward: {loss.item():.6f}; diagnostics={diagnostics}")
+        grads = [p.grad for p in parameters if p.requires_grad and p.grad is not None]
+        if not grads or not all(torch.isfinite(g).all().item() for g in grads):
+            raise AssertionError(f"No finite {component} parameter gradients")
+        print(f"[PASS] {component} backward")
+    print(f"[PASS] BC loss: {loss.item():.6f}; diagnostics={diagnostics}")
 
     policy.eval()
     with torch.no_grad():
