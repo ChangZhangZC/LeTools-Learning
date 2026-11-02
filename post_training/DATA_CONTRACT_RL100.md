@@ -135,9 +135,41 @@ python post_training/tests/smoke/smoke_01_rl100_batch_contract.py
 
 This checks dynamic state/action dimensions, single/batched input, RGB layout/ranges, missing views, action horizon, and finite values. It does **not** test Zarr decoding, LeRobot dataset creation, reward labels, RL1002D loss or robot rollouts.
 
+## Batch 01C — verbatim original ARBiM reader port
+
+Source: `ChangZhangZC/kdc_ARBiM@feature/flywheel`,
+`post_training/src/post_rl/data/{offline_buffer,sampler,offline_dataset}.py`.
+Destination: `post_training/src/arbim_rl100/data/`, under the **same
+filenames**. These three source files have identical Git blob SHA to
+their old counterparts: no function, API, algorithm or behavior changed.
+
+The old `OfflineBuffer` lazily decodes `jpeg_bytes_v1` RGB using
+`next_index`; `SequenceSampler` retains `numba.jit` and its original
+episode-aware window/padding/stride behavior; `OfflineDataset` retains
+train/validation split, optional Depth, next observation, endpoint-only,
+and latent-cache branches. The existing `batch_adapter.py` (a
+separate necessary integration shim) maps dataset samples to native
+RL1002D input tensors. No new ReplayBuffer or Sampler algorithm was
+introduced.
+
+```bash
+# Run these after restoring the pinned Zarr 2.x environment.
+python -c "import numba; print('numba', numba.__version__)"
+python post_training/tests/smoke/smoke_01_lerobot_to_zarr.py
+python post_training/tests/smoke/smoke_01_offline_reader.py
+```
+
+If `numba` is absent, install only that package with
+`python -m pip install 'numba>=0.61.2,<0.63'`; it is recorded in
+`post_training/requirements-rl100-extra.txt`. A passing synthetic
+test verifies *loading and batching*, not complete model BC training,
+nor validated reward suitability for Offline PPO. An extra
+`RL1002D.compute_loss()` real-data integration test and native
+`LinearNormalizer` fitting remain mandatory before closing Batch 01.
+
 ## Remaining Batch 01 work
 
 1. `gpt/rl100-lerobot-zarr`: initial LeRobot 0.5.2 → Zarr converter and synthetic contract tests implemented (see `LEROBOT_TO_ZARR_RL100.md`); real-data validation, computed Reward V2 and performance benchmarking still pending.
-2. `gpt/rl100-dataset-adapter`: port the lazy JPEG OfflineBuffer and episode sampler; build a proper RL100Dataset with validation split and fitted native `LinearNormalizer`.
+2. `gpt/rl100-offline-reader`: original `offline_buffer.py`, `sampler.py`, `offline_dataset.py` copied verbatim from `kdc_ARBiM@feature/flywheel` (verified matching Git blob SHA); synthetic Zarr→Dataset→RL1002D batch-adapter test added, server validation pending. Native RL1002D `LinearNormalizer` fitting remains for subsequent integration.
 3. `gpt/rl100-zarr-merge`: port metadata-aware merge with episode/offset/reward checks.
 4. Real-data smoke tests, then promote `feature/rl100-data` to `arbim/dev`.
