@@ -23,6 +23,13 @@ import cv2
 import numpy as np
 import zarr
 from numcodecs import Blosc
+from tqdm import tqdm
+
+DEPTH_FEATURE_TO_BUFFER = {
+    "observation.depth_h": "head_depth",
+    "observation.depth_l": "wrist_left_depth",
+    "observation.depth_r": "wrist_right_depth",
+}
 
 RGB_FEATURES = {
     "observation.images.head_cam_h": "head_rgb",
@@ -64,20 +71,43 @@ def _vector(value: Any, field: str, dim: int | None = None) -> np.ndarray:
     return arr.astype(np.float32)
 
 
+def _to_uint8_chw(image):
+    image = np.asarray(image)
+    if image.ndim != 3:
+        raise ValueError(f"RGB image must be 3D, got shape={image.shape}")
+    if image.shape[0] in (1, 3, 4):
+        chw = image
+    elif image.shape[-1] in (1, 3, 4):
+        chw = np.moveaxis(image, -1, 0)
+    else:
+        raise ValueError(f"cannot infer RGB channel axis from shape={image.shape}")
+    if chw.shape[0] != 3:
+        raise ValueError(f"RGB image must have 3 channels, got shape={chw.shape}")
+    if chw.dtype == np.uint8:
+        return np.ascontiguousarray(chw)
+    if np.issubdtype(chw.dtype, np.floating):
+        min_value = float(np.nanmin(chw))
+        max_value = float(np.nanmax(chw))
+        if min_value >= -1e-6 and max_value <= 1.0 + 1e-6:
+            chw = chw * 255.0
+        elif min_value < -1e-6 or max_value > 255.0 + 1e-6:
+            raise ValueError(
+                f"RGB float image must be in [0,1] or [0,255], got [{min_value}, {max_value}]"
+            )
+    chw = np.clip(np.rint(chw), 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(chw)
+
+
+
+
 def _rgb(value: Any, field: str, shape: tuple[int, ...] | None = None) -> np.ndarray:
     arr = _numpy(value, field)
-    if arr.ndim != 3 or arr.shape[0] != 3:
-        raise ValueError(f"{field}: expected RGB [3,H,W], got {arr.shape}")
-    if shape is not None and arr.shape != shape:
-        raise ValueError(f"{field}: shape drift {arr.shape}, expected {shape}")
-    if arr.dtype == np.uint8:
-        return np.ascontiguousarray(arr)
-    if arr.dtype.kind != "f" or not np.isfinite(arr).all():
-        raise ValueError(f"{field}: expected uint8 or finite float RGB")
-    if arr.min() < 0 or arr.max() > 1:
-        raise ValueError(f"{field}: float RGB must be in [0,1], not [0,255]")
-    return np.ascontiguousarray(np.rint(arr * 255).astype(np.uint8))
-
+    if not np.isfinite(arr).all():
+        raise ValueError(f"{field}: contains nonfinite RGB values")
+    chw = _to_uint8_chw(arr)
+    if shape is not None and chw.shape != shape:
+        raise ValueError(f"{field}: shape drift {chw.shape}, expected {shape}")
+    return chw
 
 def _jpeg(value: np.ndarray, quality: int) -> bytes:
     bgr = cv2.cvtColor(np.moveaxis(value, 0, -1), cv2.COLOR_RGB2BGR)
@@ -130,6 +160,133 @@ def reward_offsets_from_json(
         if n is not None and n != end - start:
             raise ValueError(f"Episode {episode_id}: reward frame count mismatch")
     return offsets
+
+
+def _as_numpy(value, feature_name, frame_index):
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        value = value.numpy()
+    array = np.asarray(value)
+    if (
+        array.size == 0
+        or array.dtype == object
+        or not np.issubdtype(array.dtype, np.number)
+    ):
+        raise ValueError(
+            f"frame {frame_index} has an invalid {feature_name!r} value "
+            f"(shape={array.shape}, dtype={array.dtype})"
+        )
+    return array
+
+
+
+def _batch_column(dataset, key, indices):
+    hf_dataset = getattr(dataset, "hf_dataset", None)
+    if hf_dataset is None:
+        raise AttributeError("LeRobot dataset does not expose hf_dataset")
+    try:
+        values = hf_dataset[key][indices]
+    except (KeyError, TypeError, IndexError):
+        values = hf_dataset[indices][key]
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    return values
+
+
+def _stack_video_batch(frames, count, feature_name):
+    if count == 1 and getattr(frames, "ndim", None) == 3:
+        frames = frames.unsqueeze(0)
+    if len(frames) != count:
+        raise RuntimeError(
+            f"batched video decode for {feature_name!r} returned {len(frames)} frames, "
+            f"expected {count}"
+        )
+    return frames
+
+
+def _load_lerobot_frame_batch(dataset, episode_id, frame_indices, use_depth):
+    """Decode one episode slice in batches so RAM is bounded by stream_batch_size."""
+    if not frame_indices:
+        return []
+    count = len(frame_indices)
+    state_values = _batch_column(dataset, "observation.state", frame_indices)
+    action_values = _batch_column(dataset, "action", frame_indices)
+    items = [
+        {
+            "agent_pos": _as_numpy(state_values[i], "observation.state", frame_indices[i]),
+            "action": _as_numpy(action_values[i], "action", frame_indices[i]),
+            "rgb": {},
+        }
+        for i in range(count)
+    ]
+    if use_depth:
+        for item in items:
+            item["depth"] = {}
+
+    video_keys = set(getattr(dataset.meta, "video_keys", []))
+    requested_video_keys = [
+        key
+        for key in [
+            *RGB_FEATURES.keys(),
+            *(DEPTH_FEATURE_TO_BUFFER.keys() if use_depth else []),
+        ]
+        if key in video_keys
+    ]
+    if requested_video_keys:
+        timestamp_values = _batch_column(dataset, "timestamp", frame_indices)
+        timestamps = [
+            float(value.item() if hasattr(value, "item") else value)
+            for value in timestamp_values
+        ]
+        video_batch = dataset.reader._query_videos(
+            {key: timestamps for key in requested_video_keys}, episode_id
+        )
+        for key in requested_video_keys:
+            frames = _stack_video_batch(video_batch[key], count, key)
+            target = "rgb" if key in RGB_FEATURES else "depth"
+            for i in range(count):
+                items[i][target][key] = _as_numpy(frames[i], key, frame_indices[i])
+
+    for key in [key for key in RGB_FEATURES if key not in video_keys]:
+        values = _batch_column(dataset, key, frame_indices)
+        if len(values) != count:
+            raise RuntimeError(
+                f"batched column read for {key!r} returned {len(values)} frames, expected {count}"
+            )
+        for i, value in enumerate(values):
+            items[i]["rgb"][key] = _as_numpy(value, key, frame_indices[i])
+
+    if use_depth:
+        for key in [key for key in DEPTH_FEATURE_TO_BUFFER if key not in video_keys]:
+            values = _batch_column(dataset, key, frame_indices)
+            if len(values) != count:
+                raise RuntimeError(
+                    f"batched column read for {key!r} returned {len(values)} frames, expected {count}"
+                )
+            for i, value in enumerate(values):
+                items[i]["depth"][key] = _as_numpy(value, key, frame_indices[i])
+
+    for i, item in enumerate(items):
+        missing_rgb = [key for key in RGB_FEATURES if key not in item["rgb"]]
+        if missing_rgb:
+            raise KeyError(f"frame {frame_indices[i]} is missing RGB feature(s): {missing_rgb}")
+        if use_depth:
+            missing_depth = [key for key in DEPTH_FEATURE_TO_BUFFER if key not in item["depth"]]
+            if missing_depth:
+                raise KeyError(
+                    f"frame {frame_indices[i]} is missing depth feature(s): {missing_depth}"
+                )
+    return items
+
+
+def _can_batch_decode(dataset):
+    return (getattr(dataset, "reader", None) is not None and
+            hasattr(dataset.reader, "_query_videos") and
+            getattr(dataset, "hf_dataset", None) is not None)
+
 
 
 class _ZarrWriter:
@@ -280,6 +437,9 @@ def convert_dataset(
         reward_offsets_from_json(Path(reward_json), episodes)
         if reward_json is not None else {}
     )
+    # Original kdc_ARBiM batch decode; new LeRobot's private method moved
+    # from the facade onto DatasetReader. Synthetic fixtures use item fallback.
+    batch_decode = _can_batch_decode(dataset)
     first = _frame(dataset[0])
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=output.name + ".partial.", dir=output.parent))
@@ -312,31 +472,44 @@ def convert_dataset(
             }],
         })
         episode_ends = []
+        progress = tqdm(total=total, desc="Streaming build_db")
         for episode_id, start, end in episodes:
             pending = None
             episode_rewards = []
-            for index in range(start, end):
-                current = first if index == 0 else _frame(
-                    dataset[index], first["state"].size, first["action"].size,
-                    writer.shapes,
-                )
-                step = index - start
-                terminal = index == end - 1
-                reward = (
-                    float(step == reward_offsets[episode_id])
-                    if reward_mode == "recorded_sparse" else float(terminal)
-                )
-                episode_rewards.append(reward)
-                if pending is not None:
-                    writer.append({
-                        "state": pending["state"], "next_state": current["state"],
-                        "action": pending["action"], "next_action": current["action"],
-                        "rgb": pending["rgb"], "reward": [episode_rewards[-2]],
-                        "return": [0.0], "done": [False], "timeout": [False],
-                        "next_index": index,
-                    })
-                pending = current
-            assert pending is not None
+            for batch_start in range(start, end, stream_batch_size):
+                batch_indices = list(range(batch_start, min(batch_start + stream_batch_size, end)))
+                if batch_decode:
+                    raw_batch = _load_lerobot_frame_batch(dataset, episode_id, batch_indices, False)
+                    raw_batch = [
+                        {"observation.state": row["agent_pos"],
+                         "action": row["action"], **row["rgb"]}
+                        for row in raw_batch
+                    ]
+                else:
+                    raw_batch = [dataset[i] for i in batch_indices]
+                for index, raw in zip(batch_indices, raw_batch, strict=True):
+                    current = first if index == 0 else _frame(
+                        raw, first["state"].size, first["action"].size,
+                        writer.shapes,
+                    )
+                    step = index - start
+                    terminal = index == end - 1
+                    reward = (
+                        float(step == reward_offsets[episode_id])
+                        if reward_mode == "recorded_sparse" else float(terminal)
+                    )
+                    episode_rewards.append(reward)
+                    if pending is not None:
+                        writer.append({
+                            "state": pending["state"], "next_state": current["state"],
+                            "action": pending["action"], "next_action": current["action"],
+                            "rgb": pending["rgb"], "reward": [episode_rewards[-2]],
+                            "return": [0.0], "done": [False], "timeout": [False],
+                            "next_index": index,
+                        })
+                    pending = current
+                    progress.update(1)
+                assert pending is not None
             writer.append({
                 "state": pending["state"], "next_state": pending["state"],
                 "action": pending["action"], "next_action": pending["action"],
@@ -365,6 +538,9 @@ def convert_dataset(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        if "progress" in locals():
+            progress.close()
 
 
 def main() -> None:
