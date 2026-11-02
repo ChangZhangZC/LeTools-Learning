@@ -9,6 +9,7 @@ resizes images, or silently changes action horizon alignment.
 """
 from __future__ import annotations
 
+from collections import UserDict
 from typing import Any, Mapping
 
 import torch
@@ -18,6 +19,21 @@ SOURCE_TO_RL100 = {
     "wrist_left_rgb": "rgb_left_hand",
     "wrist_right_rgb": "rgb_right_hand",
 }
+
+
+
+def adapt_rl100_shape_meta(shape_meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve native RL1002D while adapting its recursive dict_apply contract.
+
+    Native RL1002D uses dict_apply(obs_meta, lambda x: x['shape']), where
+    dict_apply recursively descends into plain dict values. UserDict is a
+    picklable Mapping (not a dict), so each feature spec stays a leaf and
+    the original RL-100 model receives its expected shape list unchanged.
+    """
+    return {
+        **shape_meta,
+        "obs": {key: UserDict(spec) for key, spec in shape_meta["obs"].items()},
+    }
 
 
 def _tensor(value: Any, name: str) -> torch.Tensor:
