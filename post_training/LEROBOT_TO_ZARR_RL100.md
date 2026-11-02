@@ -31,7 +31,7 @@ data/{head_rgb,wrist_left_rgb,wrist_right_rgb}_jpeg_data
 data/{head_rgb,wrist_left_rgb,wrist_right_rgb}_jpeg_offsets
 meta/episode_ends
 attrs: rgb_storage, rgb_shapes, rgb_dtype, reward_mode, reward_source,
-       reward_validated, return_gamma, source_manifest
+       reward_validated, reward_event, return_gamma, source_manifest
 ```
 
 For each episode, nonterminal transitions use `next_index=i+1`. Its last
