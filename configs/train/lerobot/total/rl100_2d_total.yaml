@@ -61,6 +61,7 @@ policy:
   pretrained_path: null
   horizon: 9
   n_action_steps: 4
+  drop_n_last_frames: 7  # Avoid future-action padding across episode ends
   # LeRobot processor is IDENTITY; raw RGB scaled [0,1] by LeRobot trainer.
   # Native RL-100 LinearNormalizer fits state/action from dataset stats.
   normalization_mapping:
