@@ -1,0 +1,35 @@
+# Native RL-100 RL1002D via the LeRobot policy-plugin interface.
+# No Zarr is read during BC/IL training.
+dataset:
+  repo_id: "lerobot/your_dataset"
+  root: null  # Required: absolute path to local LeRobot Dataset v3
+
+training:
+  resume: false
+  output_dir: "outputs/train/rl100_2d"
+  job_name: "rl100_2d"
+  batch_size: 4
+  steps: 100000
+  save_freq: 10000
+  log_freq: 50
+  num_workers: 2
+  seed: 42
+
+wandb:
+  enable: false
+  project: "rl100_2d_bc"
+
+policy:
+  type: rl100_2d
+  pretrained_path: null
+  use_amp: false
+  n_obs_steps: 2
+  horizon: 9
+  n_action_steps: 4
+  # Original RL-100 actor, full-sized UNet. Small smoke override: [32,64,128].
+  down_dims: [256, 512, 1024]
+  diffusion_step_embed_dim: 256
+  num_train_timesteps: 100
+  num_inference_steps: 10
+  resize: 224
+  resnet_weights: null  # Optional: 'r3m' when weights/dependencies are available
