@@ -1,4 +1,4 @@
-# Batch 02 — native RL1002D BC/IL training (server acceptance pending)
+# Batch 02 — native RL1002D BC/IL training (one-step acceptance passed)
 
 ## Boundary and source code
 
@@ -69,7 +69,7 @@ branch and with `data/zarr/icra_task1_10bags_parity.zarr` in place:
 
 ```bash
 git fetch origin
-git switch --track origin/gpt/rl100-bc-train-v2
+git switch --track origin/feature/rl100-il
 
 python post_training/src/arbim_rl100/train_bc.py \
   --config post_training/configs/bc/rl100_2d_bc.yaml
@@ -85,8 +85,13 @@ invocation reconstructs native RL1002D from the saved config, checks
 optimizer state exists, strictly restores the model and EMA weights,
 checks Normalizer weights, and runs a finite action prediction.
 
-Expected acceptance: a finite `[BC]` train/val loss, a saved
-`latest.ckpt`, then all `[PASS]` checkpoint outputs.
+Observed on server (`letools_chang`): single optimizer update succeeded with
+`train_loss=1.0632834434509277`, `val_loss=1.0436851978302002`,
+`epoch=0`, `global_step=1`; saved `latest.ckpt`. In a fresh Python
+process, strict model/normalizer/EMA restoration and optimizer/scheduler
+state restoration passed, and restored `Action Chunk=(1,4,16)` was finite.
+**This verifies one training step and restore, not convergence, full epochs,
+rollout performance, nor compatibility with original combined Workspace.**
 
 If a previous one-step checkpoint already exists, the training
 command **refuses to overwrite it** without `--resume`; select a
@@ -95,12 +100,12 @@ training run, set `training.max_train_steps_per_epoch: null`,
 increase `training.epochs`, restore appropriate learning-rate
 warmup, and leave other original RL-100 behavior unchanged.
 
-## Gates before merging Batch 02
+## Acceptance and branch lifecycle
 
-1. Execute the one-step train/optimizer/checkpoint smoke on actual
-   LeRobot-derived Zarr.
-2. Execute `smoke_02_bc_checkpoint.py` in a fresh Python process.
-3. Check logs and that the `output.dir` is under ignored
-   `outputs/train`.
-4. **Do not** merge this work branch until the server reports success.
-   Batch 03 simulator evaluation and later Offline PPO remain separate.
+1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
+2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
+3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
+4. Squash merge this **validated BC-only training capability** into
+   `arbim/dev`. Continued full-epoch training and deployment evaluation
+   require their own tests and should not be reported as validated here.
+   PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
