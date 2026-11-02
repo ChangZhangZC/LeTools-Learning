@@ -30,6 +30,7 @@ def check_imports() -> None:
             "Run: git submodule update --init third_party/rl100"
         )
     sys.path.insert(0, str(RL100_ROOT))
+    sys.path.insert(0, str(REPO_ROOT / "post_training" / "src"))
     print(f"Python: {sys.version.split()[0]}")
     print(f"RL-100 root: {RL100_ROOT}")
     for name in MODULES:
@@ -43,6 +44,7 @@ def check_imports() -> None:
 def check_forward(device_name: str) -> None:
     import torch
 
+    from arbim_rl100.data.batch_adapter import adapt_rl100_shape_meta
     from rl_100.model.vision.model_getter import get_resnet
     from rl_100.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
     from rl_100.policy.rl100_2d import RL1002D
@@ -66,6 +68,7 @@ def check_forward(device_name: str) -> None:
         },
         "action": {"shape": [16]},
     }
+    shape_meta = adapt_rl100_shape_meta(shape_meta)
     obs_encoder = MultiImageObsEncoder(
         shape_meta=shape_meta,
         rgb_model=get_resnet("resnet18", weights=None),

@@ -1,0 +1,5 @@
+# Runtime data belongs on the local training server, not in GitHub.
+# Preserve only the directory layout instructions.
+*
+!.gitignore
+!README.md
