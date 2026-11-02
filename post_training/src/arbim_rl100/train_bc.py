@@ -421,6 +421,13 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
 
 
 def main():
+    raise RuntimeError(
+        "The Zarr-based BC trainer has been retired. "
+        "BC/IL must use the LeRobot Dataset and native RL1002D policy plugin: "
+        "python kuavo_model/train.py --policy rl100_2d. "
+        "Zarr is reserved for RL post-training."
+    )
+    # Retain the historical entrypoint below only for past experiment audit.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--resume", type=Path, default=None)
