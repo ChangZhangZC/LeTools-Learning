@@ -194,11 +194,18 @@ def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler, *, ema=None
     states = payload["state_dicts"]
     if (ema_model is None) != ("ema_model" not in states):
         raise ValueError("Checkpoint EMA enabled state differs from training config")
+    # RL-100 DictOfTensorMixin._load_from_state_dict REPLACES the normalizer
+    # ParameterDict using checkpoint tensors on CPU (map_location="cpu").
+    # Restore the entire model to its original device before loading AdamW.
+    target_device = next(model.model.parameters()).device
     model.load_state_dict(states["model"], strict=True)
+    model.to(target_device)
     optimizer.load_state_dict(states["optimizer"])
     lr_scheduler.load_state_dict(states["lr_scheduler"])
     if ema_model is not None:
+        ema_device = next(ema_model.model.parameters()).device
         ema_model.load_state_dict(states["ema_model"], strict=True)
+        ema_model.to(ema_device)
     saved = payload["pickles"]
     epoch, global_step = (
         int(dill.loads(saved["epoch"])),
