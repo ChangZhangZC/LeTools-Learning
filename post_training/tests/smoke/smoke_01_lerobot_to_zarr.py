@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -18,7 +19,7 @@ import zarr
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "post_training" / "src"))
-from arbim_rl100.data.lerobot_to_zarr import convert_dataset, episode_ranges
+from arbim_rl100.data.lerobot_to_zarr import convert_dataset, episode_ranges, _rgb, RGB_FEATURES
 
 
 class _Dataset:
@@ -68,6 +69,82 @@ class LeRobotToZarrTest(unittest.TestCase):
         self.path = Path(self.temp.name)
         self.labels = self.path / "reward.json"
         _recorded_json(self.labels)
+
+    def test_legacy_float_255_image_supported(self):
+        image = np.full((3, 8, 12), 127.0, dtype=np.float32)
+        np.testing.assert_array_equal(
+            _rgb(image, "rgb"), np.full((3, 8, 12), 127, dtype=np.uint8)
+        )
+        hwc = np.transpose(image, (1, 2, 0))
+        np.testing.assert_array_equal(_rgb(hwc, "rgb"), _rgb(image, "rgb"))
+
+    def test_original_reward_v2_computation(self):
+        episodes = [0] * 12 + [1] * 12
+        dataset = _Dataset(episodes=episodes)
+        for index, frame in enumerate(dataset.frames):
+            action = torch.zeros(16, dtype=torch.float32)
+            local_step = index % 12
+            if 3 <= local_step < 7:
+                action[7] = action[15] = 1.0
+            frame["action"] = action
+        out = convert_dataset(
+            dataset, self.path / "computed.zarr",
+            reward_mode="last_gripper_release_sparse",
+        )
+        root = zarr.open_group(str(out), mode="r")
+        self.assertTrue(root.attrs["reward_validated"])
+        self.assertEqual(root.attrs["reward_source"], "computed_last_gripper_release")
+        reward = root["data"]["reward"][:, 0]
+        self.assertEqual(int(np.count_nonzero(reward)), 2)
+        self.assertEqual(reward[[7, 19]].tolist(), [1.0, 1.0])
+
+    def test_original_optional_depth_arrays(self):
+        dataset = _Dataset()
+        depth_names = ("observation.depth_h", "observation.depth_l", "observation.depth_r")
+        for i, frame in enumerate(dataset.frames):
+            for j, key in enumerate(depth_names):
+                frame[key] = torch.full((1, 5, 7), i * 10 + j, dtype=torch.uint16)
+        out = convert_dataset(
+            dataset, self.path / "depth.zarr", reward_json=self.labels,
+            use_depth=True,
+        )
+        root = zarr.open_group(str(out), mode="r")
+        self.assertTrue(root.attrs["use_depth"])
+        data = root["data"]
+        self.assertEqual(data["head_depth"].dtype, np.dtype("uint16"))
+        np.testing.assert_array_equal(data["head_depth"][0], 0)
+        np.testing.assert_array_equal(data["next_head_depth"][0], 10)
+        np.testing.assert_array_equal(data["next_head_depth"][2], 20)
+
+    def test_reused_legacy_batch_video_decoder(self):
+        dataset = _Dataset()
+        dataset.meta = SimpleNamespace(video_keys=list(RGB_FEATURES))
+        dataset.hf_dataset.update({
+            "observation.state": torch.stack([f["observation.state"] for f in dataset.frames]),
+            "action": torch.stack([f["action"] for f in dataset.frames]),
+            "timestamp": torch.tensor([0.0, 0.1, 0.2, 0.0, 0.1]),
+        })
+        lookup = {
+            (int(dataset.hf_dataset["episode_index"][i]), round(float(dataset.hf_dataset["timestamp"][i]), 3)): i
+            for i in range(len(dataset))
+        }
+        calls = []
+        class FakeReader:
+            def _query_videos(self, query_timestamps, episode_id):
+                calls.append(len(next(iter(query_timestamps.values()))))
+                return {
+                    key: torch.stack([
+                        dataset.frames[lookup[(episode_id, round(float(t), 3))]][key]
+                        for t in ts
+                    ])
+                    for key, ts in query_timestamps.items()
+                }
+        dataset.reader = FakeReader()
+        output = convert_dataset(dataset, self.path / "batch.zarr", reward_json=self.labels,
+                                 stream_batch_size=2)
+        self.assertEqual(calls, [2, 1, 2])
+        root = zarr.open_group(str(output), mode="r")
+        self.assertEqual(root["meta"]["episode_ends"][:].tolist(), [3, 5])
 
     def test_reject_zarr3_with_actionable_error(self):
         from unittest.mock import patch
@@ -151,7 +228,7 @@ class LeRobotToZarrTest(unittest.TestCase):
     def test_reject_wrong_image_scale_and_cleanup(self):
         dataset = _Dataset()
         dataset.frames[3]["observation.images.head_cam_h"] = (
-            dataset.frames[3]["observation.images.head_cam_h"].float()
+            dataset.frames[3]["observation.images.head_cam_h"].float() + 300
         )
         with self.assertRaises(ValueError):
             convert_dataset(dataset, self.path / "cache.zarr", reward_json=self.labels)
