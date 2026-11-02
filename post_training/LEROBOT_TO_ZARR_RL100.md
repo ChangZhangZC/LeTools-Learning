@@ -1,25 +1,34 @@
 # Batch 01 — LeRobot 0.5.2 to ARBiM offline Zarr (sub-batch 02)
 
-Development branch: `gpt/rl100-lerobot-zarr`. This is **unvalidated on real
-LeRobot data** until the server tests pass. The RL-100 submodule remains pinned
-and unmodified.
+Initial development branch: `gpt/rl100-lerobot-zarr`.
+Source-parity review branch: `gpt/rl100-data-source-parity`.
+The earlier 9 Zarr and 3 reader **synthetic** tests passed on the server,
+but the updated converter has not yet passed its new regressions or a
+complete real-data conversion. The RL-100 submodule remains unmodified.
 
 ## Supported input and output
 
-The new reader uses the **public** LeRobot 0.5.2 `LeRobotDataset(repo_id=...,
-root=..., return_uint8=True)` constructor and indexed `dataset[i]` decoding.
-It does not call the old private `_query_videos` from LeRobot 0.4.2 and does
-not use the deprecated NPY streaming bridge. All three RGB cameras are required:
+The converter uses the public LeRobot `LeRobotDataset(repo_id=...,
+root=..., return_uint8=True)` constructor. To preserve original ARBiM's
+batch decode, it reuses the old `_batch_column`,
+`_stack_video_batch`, and `_load_lerobot_frame_batch` implementations.
+The **only necessary private video-access relocation** is
+`dataset._query_videos(...)` → `dataset.reader._query_videos(...)`
+in the pinned LeRobot facade; the pre-existing indexed `dataset[i]`
+path remains as fallback for synthetic or incompatible readers.
+No deprecated NPY streaming bridge is used. Three RGB views are required:
 
 - `observation.images.head_cam_h` → `head_rgb`;
 - `observation.images.wrist_cam_l` → `wrist_left_rgb`;
 - `observation.images.wrist_cam_r` → `wrist_right_rgb`.
 - `observation.state` and `action` remain dynamic dimensional vectors.
 
-Images are checked as CHW RGB. A `uint8` image is stored at its original
-pixel scale before JPEG encoding. A float image must be finite in `[0,1]`;
-it is converted to uint8 once. Camera dimension drift and missing features
-abort the entire output. No Depth is exported in this first version.
+Images are converted with the original ARBiM `_to_uint8_chw()`;
+CHW/HWC RGB and finite float `[0,1]` or `[0,255]` are accepted.
+Missing features or image dimension drift abort the output.
+Optional `--use-depth` restores original three Depth field names
+`observation.depth_h/l/r` and their dense `next_*` Zarr arrays.
+Depth is not an input to the current RL1002D RGB-only BC smoke test.
 
 The generated Zarr is a **derived cache** compatible with the old ARBiM
 `jpeg_bytes_v1` layout:
@@ -66,14 +75,22 @@ a JSON object with `episodes`, one record per LeRobot episode:
 The reward offset must be **strictly before the episode's last frame**.
 All episodes must have verified records; missing/invalid records abort.
 An existing ARBiM Staging provenance JSON with those same episode fields
-can be passed directly, but merged-format reward records are not yet supported.
+can be passed directly. The source-parity review also restores the original
+`--reward-mode last_gripper_release_sparse` automatic detector:
+it loads valid recorded Staging/Merge provenance when present, computes
+missing Teleop rewards using the original gripper release detector,
+and supports original `--reward-source auto|recorded|computed` selection.
+The original `episode_end_shaped` mode is restored as an explicit option.
+Gripper indices, open-side inference, dwell, expected cycles and
+shaping parameters use the original defaults and are configurable via CLI.
 
 For *format-only smoke testing*, users may explicitly set
 `--reward-mode terminal_proxy` (does not require JSON). This assigns a
 synthetic +1 at each episode end and sets `reward_validated=false`. It is
 not a replacement for ARBiM Reward V2 and **must not feed PPO training as
-if it were an observed success signal**. Teleop-only computed Reward V2
-detection and mixed recorded/computed rewards are **not yet migrated**.
+if it were an observed success signal**. `episode_end_shaped` is also marked
+`reward_validated=false` under the new conversion metadata contract; it is
+not a verified sparse task-success label.
 
 ## Zarr 2.x environment requirement
 
@@ -136,6 +153,36 @@ fix for broken TorchCodec binaries and does not imply any source changes.
 Real-data conversion is not verified until this command completes on
 the server.
 
+## Source-preserving code review (pending tests)
+
+**Unchanged copies** from `kdc_ARBiM@feature/flywheel`:
+`offline_buffer.py`, `sampler.py`, `offline_dataset.py`
+(identical Git blob SHA).
+
+**Restored from** old `post_training/src/post_rl/data/data_prepare.py`:
+`_to_uint8_chw`, `_batch_column`, `_stack_video_batch`,
+`_load_lerobot_frame_batch`, `_stack_action_column`,
+`_infer_gripper_thresholds`, `_classify_gripper`,
+`_debounced_gripper_transitions`, `_last_gripper_release_offsets`,
+`_validate_recorded_reward`, `_reward_offsets_for_subset`,
+`_staging_reward_offsets`; plus original-shaped reward and progress.
+
+**Necessary differences remaining:** LeRobot DatasetReader's private video
+method location, the pre-existing `recorded_sparse` external-label
+test contract, the explicit format-only `terminal_proxy` test mode,
+and the already validated episode-contiguous Zarr/JPEG staging writer.
+The old `raw_to_npy` / `build_db` NPY bridges are separate modes,
+not the direct LeRobot-to-Zarr entrypoint. The old `merge_zarr` mode
+remains scheduled for the next batch, not silently deleted.
+
+```bash
+# Work branch tests (NOT YET CONFIRMED on server):
+git fetch origin
+git switch gpt/rl100-data-source-parity
+python post_training/tests/smoke/smoke_01_lerobot_to_zarr.py
+python post_training/tests/smoke/smoke_01_offline_reader.py
+```
+
 ## Run on the server
 
 ```bash
@@ -164,14 +211,17 @@ python post_training/src/arbim_rl100/data/lerobot_to_zarr.py \
 
 No existing output path is overwritten. The converter writes to a temporary
 sibling directory and renames it only after writing all episodes; errors
-clean up the temporary directory. The current public item-based video decode
-may be slower than batched decode on a very large dataset. Performance
-optimization requires a separate benchmark and must not change the data
-contract.
+clean up the temporary directory. The source-parity branch
+restores original batched video decode and `Streaming build_db` progress
+via `tqdm`. Performance and byte-for-byte equivalence have **not** yet been
+benchmarked on the real dataset. The original Zarr storage schema remains
+the comparison target.
 
 ### Deferred work
 
-- Teleop Reward V2 computation and mixed-source/staging-merge provenance;
-- LeRobot 0.5.2 decoder benchmarking and bounded batched access;
-- OfflineBuffer + SequenceSampler/normalizer port and real end-to-end data test;
-- Zarr merge/Reward consistency validation.
+- Server validation of the review branch's expanded synthetic regressions
+  (batch decoder, computed/recorded Reward V2, shaped reward and Depth);
+- End-to-end real LeRobot conversion with `--video-backend pyav`, followed
+  by the RL1002D native BC Loss/Backward test;
+- Zarr merge/Reward consistency validation using the original ARBiM code;
+- Standardizing the original YAML entrypoint after source parity is verified.
