@@ -272,9 +272,53 @@ does not yet prove BC Loss or Backward. Separately inspect the
 server-local `M third_party/rl100` submodule before deciding whether
 any local upstream modifications need retaining.
 
+## Batch 01E — original Zarr Merge (work branch; server tests pending)
+
+**Original**: `ChangZhangZC/kdc_ARBiM@feature/flywheel`,
+`post_training/src/post_rl/data/zarr_merge.py`.
+
+**Destination**: `post_training/src/arbim_rl100/data/zarr_merge.py`.
+The original 318-line script was copied without change *first*, then
+modified only where new LeTools Zarr's Reward provenance needs preservation:
+
+- No change to original `_reward_mode`, `_read_source`,
+  `_check_compatible`, `_create_arrays`, index rebasing, JPEG-byte
+  concatenation, Episode boundary construction or Return computation.
+- Merged `reward_validated` is true **only if every input explicitly
+  reports true**; if input metadata is absent, no inferred valid reward
+  status is fabricated. Identical `reward_source` values propagate.
+- `merge_inputs` now retains each source's original
+  `reward_source`, `reward_validated`, `reward_event`, and
+  `return_gamma` **with their local index semantics**. The script
+  does not invent a global adjusted Reward V2 index.
+- Original rejection of `terminal_proxy` is **intentional and
+  unchanged**, even for valid BC-format Zarr caches. Do not use
+  `icra_task1_10bags_parity.zarr` as an offline Reward dataset.
+- Existing `overwrite=False`, source immutability, schema validation
+  and temporary output logic are preserved. No new merge algorithm.
+
+Synthetic acceptance:
+
+```bash
+git fetch origin
+git switch --track origin/gpt/rl100-zarr-merge
+python post_training/tests/smoke/smoke_01_zarr_merge.py
+python post_training/tests/smoke/smoke_01_offline_reader.py
+```
+
+`smoke_01_zarr_merge.py` creates two small, **validated recorded-sparse
+synthetic Zarr caches**, merges them using the original function, then
+verifies Episode and Transition indices, JPEG offsets, Return,
+OfflineBuffer compatibility, provenance, and expected rejection paths.
+Tests have **not yet run on the user's LeTools server**. After they
+pass, the independent work branch can be fast-forwarded into
+`feature/rl100-data`. A real-data merge requires two compatible
+Reward-valid input caches; the BC-only `terminal_proxy` cache cannot
+satisfy this test.
+
 ## Remaining Batch 01 work
 
 1. `gpt/rl100-data-source-parity`: review-phase port restores old batch decoder, computed/recorded Reward V2, optional Depth and progress; expanded tests and real-data performance/contract validation still pending. See `LEROBOT_TO_ZARR_RL100.md`.
 2. `gpt/rl100-offline-reader`: original `offline_buffer.py`, `sampler.py`, `offline_dataset.py` copied verbatim from `kdc_ARBiM@feature/flywheel` (verified matching Git blob SHA); synthetic Zarr→Dataset→RL1002D batch-adapter test added, server validation pending. Native RL1002D `LinearNormalizer` fitting remains for subsequent integration.
-3. `gpt/rl100-zarr-merge`: port metadata-aware merge with episode/offset/reward checks.
+3. `gpt/rl100-zarr-merge`: copied original `zarr_merge.py` and added only conservative Reward provenance propagation. Synthetic merge regressions added; **server acceptance pending**.
 4. Real-data smoke tests, then promote `feature/rl100-data` to `arbim/dev`.
