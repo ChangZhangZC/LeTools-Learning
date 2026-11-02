@@ -16,3 +16,9 @@
 # endorsement of its Gym 0.21/old-step-API behavior for online environments.
 # Online RL will use a separately validated environment adapter.
 gym==0.26.2
+
+# Zarr v2 API is used by the pinned RL-100 LinearNormalizer and offline datasets.
+# Use a Python 3.12-compatible Zarr 2.x release, not the incompatible v3 API.
+# Pin numcodecs below 0.16: newer versions removed cbuffer_sizes used by Zarr v2.
+zarr==2.18.7
+numcodecs==0.15.1
