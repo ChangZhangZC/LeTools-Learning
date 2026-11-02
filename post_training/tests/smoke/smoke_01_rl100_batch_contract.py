@@ -5,6 +5,7 @@ Run: python post_training/tests/smoke/smoke_01_rl100_batch_contract.py
 """
 from __future__ import annotations
 
+import pickle
 import sys
 import unittest
 from pathlib import Path
@@ -14,7 +15,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "post_training" / "src"))
 
-from arbim_rl100.data.batch_adapter import to_rl100_bc_batch
+from arbim_rl100.data.batch_adapter import adapt_rl100_shape_meta, to_rl100_bc_batch
 
 
 class RL100DataContractTest(unittest.TestCase):
@@ -30,6 +31,23 @@ class RL100DataContractTest(unittest.TestCase):
             obs = {key: value[0] for key, value in obs.items()}
             action = action[0]
         return {"obs": obs, "action": action, "reward": torch.zeros(2, 7, 1)}
+
+    def test_rl100_shape_meta_compat_is_picklable_and_nonmutating(self):
+        from collections import UserDict
+
+        metadata = {
+            "obs": {
+                "rgb_head": {"shape": [3, 84, 84], "type": "rgb"},
+                "agent_pos": {"shape": [16], "type": "low_dim"},
+            },
+            "action": {"shape": [16]},
+        }
+        adapted = adapt_rl100_shape_meta(metadata)
+        self.assertEqual(adapted["obs"]["agent_pos"]["shape"], [16])
+        self.assertIsInstance(adapted["obs"]["rgb_head"], UserDict)
+        self.assertFalse(isinstance(adapted["obs"]["rgb_head"], dict))
+        self.assertIsInstance(metadata["obs"]["rgb_head"], dict)
+        self.assertEqual(pickle.loads(pickle.dumps(adapted)), adapted)
 
     def test_batched(self):
         src = self.make_sample()
