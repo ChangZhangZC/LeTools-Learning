@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from itertools import islice
 import random
 import sys
 from pathlib import Path
@@ -319,8 +320,8 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
         model.train()
         train_losses = []
         for step, sample in enumerate(tqdm(
-            train_loader, desc=f"Training epoch {epoch}",
-            total=steps_per_epoch, leave=False,
+            islice(train_loader, steps_per_epoch),
+            desc=f"Training epoch {epoch}", total=steps_per_epoch,
         )):
 
             batch = bc_batch(sample, n_obs_steps, device)
@@ -335,8 +336,6 @@ def train(cfg, resume: Path | None = None, stop_after_epoch: int | None = None):
                 ema.step(model)
             global_step += 1
             train_losses.append(raw_loss.item())
-            if step + 1 >= steps_per_epoch:
-                break
         if not train_losses:
             raise RuntimeError("No BC training steps executed")
         result = {"train_loss": float(np.mean(train_losses)),
