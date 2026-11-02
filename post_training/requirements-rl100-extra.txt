@@ -22,3 +22,7 @@ gym==0.26.2
 # Pin numcodecs below 0.16: newer versions removed cbuffer_sizes used by Zarr v2.
 zarr==2.18.7
 numcodecs==0.15.1
+
+# Imported by rl_100.policy.rl100_2d for debug plots / image visualization.
+# Python 3.12 compatible range; pin the tested server version in a later lockfile.
+matplotlib>=3.8,<4
