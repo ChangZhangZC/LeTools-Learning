@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "post_training" / "src"))
 RL100_ROOT = ROOT / "third_party" / "rl100" / "RL-100"
 sys.path.insert(0, str(RL100_ROOT))
 
-from arbim_rl100.data.batch_adapter import to_rl100_bc_batch
+from arbim_rl100.data.batch_adapter import adapt_rl100_shape_meta, to_rl100_bc_batch
 from arbim_rl100.data.offline_buffer import OfflineBuffer
 from arbim_rl100.data.offline_dataset import OfflineDataset
 from rl_100.model.common.normalizer import LinearNormalizer
@@ -121,6 +121,8 @@ def main() -> None:
     shape_meta["obs"]["agent_pos"] = {
         "shape": [state_dim], "type": "low_dim"
     }
+
+    shape_meta = adapt_rl100_shape_meta(shape_meta)
 
     normalizer = fit_train_normalizer(buffer, dataset.train_mask)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
