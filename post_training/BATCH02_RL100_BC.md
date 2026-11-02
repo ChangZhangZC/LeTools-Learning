@@ -100,12 +100,96 @@ training run, set `training.max_train_steps_per_epoch: null`,
 increase `training.epochs`, restore appropriate learning-rate
 warmup, and leave other original RL-100 behavior unchanged.
 
+## Multi-epoch Resume hardening (development; pending server acceptance)
+
+**Development branch:** `gpt/rl100-il-resume` → integrate into
+`feature/rl100-il` only after its regression tests pass. Only after
+all IL functionality is validated may `feature/rl100-il` be
+**Squash Merged** into `arbim/dev`. No direct `gpt/**` → dev merge.
+
+The one-step BC checkpoint was verified previously, but was not an
+exact multi-epoch resume contract. In particular, the original
+`EMAModel` owns an `optimization_step` counter **outside** its
+averaged-model `state_dict`. Recreating `EMAModel` without restoring
+that counter changes the EMA decay schedule. DataLoader ordering and
+diffusion noise also depend on Python/NumPy/Torch RNG states.
+
+New backward-compatible BC-only checkpoint fields inside the existing
+`pickles` map:
+
+- `ema_optimization_step`, `ema_decay`: continue the **original**
+  `EMAModel.step()` schedule; still uses original model weights.
+- `rng_state`: Python `random`, NumPy, CPU Torch and all CUDA
+  RNG streams captured **after** each epoch's validation.
+- Existing `cfg/state_dicts/pickles` envelope, model/normalizer,
+  optimizer, EMA state_dict and native LR scheduler state remain
+  unchanged. Older single-step checkpoints without these fields
+  can still load, but exact replay is not guaranteed.
+
+The resumed `data`, `policy`, and `training` YAML must match the
+saved configuration (except training device). This prevents accidentally
+changing total epochs while reusing a cosine scheduler state. For a
+different schedule, start a new training run rather than silently
+extending an existing checkpoint. `--stop-after-epoch N` pauses
+at a completed epoch **without changing the configured total epochs**.
+`--output-dir` only changes the destination directory. Checkpoint
+writes use a temporary file and atomic rename to avoid corrupting
+the previous `latest.ckpt` if a save fails.
+
+The previous one-step config is unchanged. The separate two-epoch
+regression YAML has `epochs=2`, `batch_size=2`,
+`max_train_steps_per_epoch=2`, `max_val_steps=1`, and `use_ema=true`.
+This is an execution/resume test, **not a convergence experiment**.
+
+### Server tests: interrupted vs uninterrupted
+
+Run all from the repository root, `conda activate letools_chang`.
+Each output directory must not already contain a checkpoint.
+
+```bash
+git fetch origin
+git switch --track origin/gpt/rl100-il-resume
+
+# Run two epochs straight: expected global_step=4.
+python post_training/src/arbim_rl100/train_bc.py \
+  --config post_training/configs/bc/rl100_2d_bc_resume_smoke.yaml \
+  --output-dir outputs/train/rl100_bc_continuous
+
+# Start another run but stop safely after epoch 1: expected global_step=2.
+python post_training/src/arbim_rl100/train_bc.py \
+  --config post_training/configs/bc/rl100_2d_bc_resume_smoke.yaml \
+  --output-dir outputs/train/rl100_bc_resumed \
+  --stop-after-epoch 1
+
+# In a new process, continue same scheduled 2 epochs: global_step=4.
+python post_training/src/arbim_rl100/train_bc.py \
+  --config post_training/configs/bc/rl100_2d_bc_resume_smoke.yaml \
+  --output-dir outputs/train/rl100_bc_resumed \
+  --resume outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
+
+# Reload finished weights and confirm real action inference.
+python post_training/tests/smoke/smoke_02_bc_checkpoint.py \
+  --checkpoint outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt \
+  --device cuda:0 --expected-epoch 2 --expected-step 4
+
+# Compare full train, optimizer, EMA, scheduler, RNG and counters.
+python post_training/tests/smoke/smoke_02_bc_resume_compare.py \
+  --continuous outputs/train/rl100_bc_continuous/checkpoints/latest.ckpt \
+  --resumed outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
+```
+
+If exact comparison fails, retain both checkpoints and logs; diagnose
+the first mismatching field before adjusting any RL-100 upstream code.
+Never treat a 2-epoch / 4-update smoke as successful IL convergence.
+
 ## Acceptance and branch lifecycle
 
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
 2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
 3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
-4. Squash merge this **validated BC-only training capability** into
-   `arbim/dev`. Continued full-epoch training and deployment evaluation
-   require their own tests and should not be reported as validated here.
+4. The validated one-step capability is currently owned by
+   `feature/rl100-il`; the new `gpt/rl100-il-resume` regression must
+   pass server tests before integration into that feature branch.
+   When all IL requirements are validated, **Squash Merge**
+   `feature/rl100-il` → `arbim/dev`; never merge `gpt/**` directly.
    PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
