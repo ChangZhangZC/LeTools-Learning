@@ -10,3 +10,9 @@
 # Requires a working PyTorch installation and C++ build toolchain;
 # CUDA compilation additionally needs a compatible CUDA toolkit/nvcc.
 -e ./third_party/rl100/third_party/pytorch3d_simplified
+
+# Legacy 'import gym' used by RL-100 unidpg.utils (distinct from LeTools gymnasium).
+# Gym 0.26.2 is selected as a Python 3.12-oriented import bridge, NOT as an
+# endorsement of its Gym 0.21/old-step-API behavior for online environments.
+# Online RL will use a separately validated environment adapter.
+gym==0.26.2
