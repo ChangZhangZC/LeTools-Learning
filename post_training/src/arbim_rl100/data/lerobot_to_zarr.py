@@ -249,11 +249,11 @@ def convert_dataset(
         raise ValueError("gamma must lie in (0,1]")
     if not 1 <= jpeg_quality <= 100 or stream_batch_size < 1:
         raise ValueError("Invalid JPEG quality or batch size")
-    if reward_mode not in {"recorded_sparse", "episode_end_shaped"}:
+    if reward_mode not in {"recorded_sparse", "terminal_proxy"}:
         raise ValueError("Unsupported reward mode")
     if reward_mode == "recorded_sparse" and reward_json is None:
         raise ValueError("recorded_sparse requires --reward-json")
-    if reward_mode == "episode_end_shaped" and reward_json is not None:
+    if reward_mode == "terminal_proxy" and reward_json is not None:
         raise ValueError("Reward JSON requires recorded_sparse mode")
 
     output = Path(output).expanduser().resolve()
@@ -275,7 +275,7 @@ def convert_dataset(
         writer.root.attrs.update({
             "reward_mode": (
                 "last_gripper_release_sparse"
-                if reward_mode == "recorded_sparse" else "episode_end_shaped"
+                if reward_mode == "recorded_sparse" else "terminal_proxy"
             ),
             "reward_source": (
                 "recorded_validated" if reward_mode == "recorded_sparse"
@@ -328,9 +328,11 @@ def convert_dataset(
             if writer.position != end:
                 raise RuntimeError("Write position disagrees with episode end")
             running = 0.0
-            for index in range(end - 1, start - 1, -1):
-                running = episode_rewards[index - start] + gamma * running
-                writer.arrays["return"][index, 0] = np.float32(running)
+            episode_returns = np.empty((end - start, 1), dtype=np.float32)
+            for step in range(end - start - 1, -1, -1):
+                running = episode_rewards[step] + gamma * running
+                episode_returns[step, 0] = running
+            writer.arrays["return"][start:end] = episode_returns
             episode_ends.append(end)
         if writer.position != total:
             raise RuntimeError("Incomplete Zarr output")
@@ -349,7 +351,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lerobot-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--reward-mode", choices=("recorded_sparse", "episode_end_shaped"),
+    parser.add_argument("--reward-mode", choices=("recorded_sparse", "terminal_proxy"),
                         default="recorded_sparse")
     parser.add_argument("--reward-json", type=Path)
     parser.add_argument("--gamma", type=float, default=0.99)
