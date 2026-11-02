@@ -8,6 +8,7 @@ After running the two workflows documented in BATCH02_RL100_BC.md:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import dill
@@ -49,7 +50,8 @@ def main():
         if (epoch, step) != (2, 4):
             raise AssertionError(f"{label}: expected (epoch=2,step=4), got {(epoch, step)}")
     assert_same(continuous["state_dicts"], resumed["state_dicts"], "state_dicts")
-    for key in ("epoch", "global_step", "ema_optimization_step", "ema_decay", "rng_state"):
+    for key in ("epoch", "global_step", "ema_optimization_step", "ema_decay",
+                "rng_state", "best_val_loss"):
         if key not in continuous["pickles"] or key not in resumed["pickles"]:
             raise AssertionError(f"Missing continuation key {key}")
         assert_same(
@@ -57,6 +59,26 @@ def main():
             dill.loads(resumed["pickles"][key]),
             f"pickles.{key}",
         )
+    for path in ("best.ckpt",):
+        left = args.continuous.with_name(path)
+        right = args.resumed.with_name(path)
+        if left.exists() != right.exists():
+            raise AssertionError(f"{path} exists only for one training run")
+        if left.exists():
+            a = torch.load(left, map_location="cpu", pickle_module=dill)
+            b = torch.load(right, map_location="cpu", pickle_module=dill)
+            assert_same(a["state_dicts"], b["state_dicts"], "best.state_dicts")
+            for key in ("epoch", "global_step", "best_val_loss"):
+                assert_same(dill.loads(a["pickles"][key]),
+                            dill.loads(b["pickles"][key]), f"best.{key}")
+    log_a = args.continuous.parents[1] / "metrics.jsonl"
+    log_b = args.resumed.parents[1] / "metrics.jsonl"
+    if log_a.exists() != log_b.exists():
+        raise AssertionError("metrics.jsonl exists only for one run")
+    if log_a.exists():
+        entries_a = [json.loads(x) for x in log_a.read_text().splitlines() if x.strip()]
+        entries_b = [json.loads(x) for x in log_b.read_text().splitlines() if x.strip()]
+        assert_same(entries_a, entries_b, "metrics.jsonl")
     print("[PASS] Uninterrupted and epoch-boundary-resumed BC states match exactly")
     print("[PASS] Model, normalizer, optimizer, scheduler, EMA, step counters and RNG match")
 
