@@ -102,10 +102,11 @@ warmup, and leave other original RL-100 behavior unchanged.
 
 ## Multi-epoch Resume hardening (development; pending server acceptance)
 
-**Development branch:** `gpt/rl100-il-resume` → integrate into
-`feature/rl100-il` only after its regression tests pass. Only after
-all IL functionality is validated may `feature/rl100-il` be
-**Squash Merged** into `arbim/dev`. No direct `gpt/**` → dev merge.
+**Development branch:** `gpt/rl100-il-resume`, fast-forwarded into
+`feature/rl100-il` as the **feature integration/testing branch**.
+The multi-epoch resume regression remains **unverified on the server**.
+Only after all IL functionality is validated may `feature/rl100-il`
+be **Squash Merged** into `arbim/dev`. No direct `gpt/**` → dev merge.
 
 The one-step BC checkpoint was verified previously, but was not an
 exact multi-epoch resume contract. In particular, the original
@@ -187,9 +188,9 @@ Never treat a 2-epoch / 4-update smoke as successful IL convergence.
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
 2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
 3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
-4. The validated one-step capability is currently owned by
-   `feature/rl100-il`; the new `gpt/rl100-il-resume` regression must
-   pass server tests before integration into that feature branch.
+4. The validated one-step capability and unvalidated multi-epoch
+   resume implementation are now integrated into `feature/rl100-il`.
+   The latter still **must pass server tests** before IL is accepted.
    When all IL requirements are validated, **Squash Merge**
    `feature/rl100-il` → `arbim/dev`; never merge `gpt/**` directly.
    PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
