@@ -23,14 +23,14 @@ from lerobot.datasets.sampler import EpisodeAwareSampler
 class LeRobotPaddingContractTest(unittest.TestCase):
     @staticmethod
     def reader():
-        # Two consecutive episodes [0, 5) and [5, 7); action horizon=4.
+        # Two consecutive episodes [0, 5) and [5, 7); H=4, n_obs_steps=2.
         reader = object.__new__(DatasetReader)
         reader._meta = SimpleNamespace(episodes=[
             {"dataset_from_index": 0, "dataset_to_index": 5},
             {"dataset_from_index": 5, "dataset_to_index": 7},
         ])
         reader.delta_indices = {
-            "action": [0, 1, 2, 3],
+            "action": [-1, 0, 1, 2],
             "observation.state": [-1, 0],
         }
         return reader
@@ -48,26 +48,26 @@ class LeRobotPaddingContractTest(unittest.TestCase):
     def test_last_frame_repeated_without_crossing_episode(self):
         reader = self.reader()
         indices, masks = reader._get_query_indices(abs_idx=4, ep_idx=0)
-        self.assertEqual(indices["action"], [4, 4, 4, 4])
-        self.assertEqual(masks["action_is_pad"].tolist(), [False, True, True, True])
+        self.assertEqual(indices["action"], [3, 4, 4, 4])
+        self.assertEqual(masks["action_is_pad"].tolist(), [False, False, True, True])
         self.assertNotIn(5, indices["action"])
 
     def test_short_episode_is_not_dropped(self):
         reader = self.reader()
         first, mask_first = reader._get_query_indices(abs_idx=5, ep_idx=1)
-        self.assertEqual(first["action"], [5, 6, 6, 6])
-        self.assertEqual(mask_first["action_is_pad"].tolist(), [False, False, True, True])
+        self.assertEqual(first["action"], [5, 5, 6, 6])
+        self.assertEqual(mask_first["action_is_pad"].tolist(), [True, False, False, True])
         self.assertEqual(first["observation.state"], [5, 5])
         self.assertEqual(
             mask_first["observation.state_is_pad"].tolist(), [True, False]
         )
         last, mask_last = reader._get_query_indices(abs_idx=6, ep_idx=1)
-        self.assertEqual(last["action"], [6, 6, 6, 6])
-        self.assertEqual(mask_last["action_is_pad"].tolist(), [False, True, True, True])
+        self.assertEqual(last["action"], [5, 6, 6, 6])
+        self.assertEqual(mask_last["action_is_pad"].tolist(), [False, False, True, True])
 
     def test_regular_in_episode_window_is_not_padded(self):
         reader = self.reader()
-        indices, masks = reader._get_query_indices(abs_idx=0, ep_idx=0)
+        indices, masks = reader._get_query_indices(abs_idx=1, ep_idx=0)
         self.assertEqual(indices["action"], [0, 1, 2, 3])
         self.assertEqual(masks["action_is_pad"].tolist(), [False] * 4)
 
