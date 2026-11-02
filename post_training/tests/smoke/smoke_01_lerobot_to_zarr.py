@@ -87,7 +87,7 @@ class LeRobotToZarrTest(unittest.TestCase):
         np.testing.assert_array_equal(d["reward"][:, 0], [0, 1, 0, 1, 0])
         np.testing.assert_allclose(d["return"][:, 0], [0.9, 1.0, 0.0, 1.0, 0.0])
         np.testing.assert_array_equal(d["state"][2], d["next_state"][2])
-        np.testing.assert_array_equal(d["state"][3], d["next_state"][4])
+        np.testing.assert_array_equal(d["next_state"][3], d["state"][4])
         np.testing.assert_array_equal(d["action"][4], d["next_action"][4])
         self.assertEqual(root.attrs["rgb_storage"], "jpeg_bytes_v1")
         self.assertTrue(root.attrs["reward_validated"])
