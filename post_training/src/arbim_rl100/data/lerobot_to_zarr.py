@@ -831,7 +831,12 @@ def convert_dataset(
         raise ValueError("gamma must lie in (0,1]")
     if not 1 <= jpeg_quality <= 100 or stream_batch_size < 1:
         raise ValueError("Invalid JPEG quality or batch size")
-    if reward_mode not in {"recorded_sparse", "last_gripper_release_sparse", "terminal_proxy"}:
+    if reward_mode == "episode_end_shaped" and int((reward_config or {}).get("max_episode_len", 2000)) <= 0:
+        raise ValueError("max_episode_len must be positive")
+    if reward_mode not in {
+        "recorded_sparse", "last_gripper_release_sparse", "episode_end_shaped",
+        "terminal_proxy",
+    }:
         raise ValueError("Unsupported reward mode")
     if reward_mode == "recorded_sparse" and reward_json is None:
         raise ValueError("recorded_sparse requires --reward-json")
@@ -881,16 +886,18 @@ def convert_dataset(
         writer = _ZarrWriter(staging, total, first, jpeg_quality, stream_batch_size)
         writer.root.attrs.update({
             "reward_mode": (
-                "terminal_proxy" if reward_mode == "terminal_proxy"
-                else "last_gripper_release_sparse"
+                "last_gripper_release_sparse"
+                if reward_mode in ("recorded_sparse", "last_gripper_release_sparse")
+                else reward_mode
             ),
             "reward_source": (
                 "recorded_validated" if reward_mode == "recorded_sparse"
                 else computed_metadata.get("source", "computed_last_gripper_release")
                 if reward_mode == "last_gripper_release_sparse"
+                else "episode_end_shaped" if reward_mode == "episode_end_shaped"
                 else "terminal_proxy_not_success_label"
             ),
-            "reward_validated": reward_mode != "terminal_proxy",
+            "reward_validated": reward_mode in ("recorded_sparse", "last_gripper_release_sparse"),
             "reward_event": {
                 "source": (
                     "external_verified_episode_json" if reward_mode == "recorded_sparse"
@@ -901,7 +908,7 @@ def convert_dataset(
                     {"episode_index": ep, "reward_offset": reward_offsets[ep]}
                     for ep, _, _ in episodes
                 ],
-            } if reward_mode != "terminal_proxy" else None,
+            } if reward_mode in ("recorded_sparse", "last_gripper_release_sparse") else None,
             "return_gamma": gamma,
             "source_manifest": [{
                 "kind": "lerobot",
@@ -916,6 +923,7 @@ def convert_dataset(
         for episode_id, start, end in episodes:
             pending = None
             episode_rewards = []
+            previous_action = None
             for batch_start in range(start, end, stream_batch_size):
                 batch_indices = list(range(batch_start, min(batch_start + stream_batch_size, end)))
                 if batch_decode:
@@ -936,11 +944,22 @@ def convert_dataset(
                     )
                     step = index - start
                     terminal = index == end - 1
-                    reward = (
-                        float(step == reward_offsets[episode_id])
-                        if reward_mode != "terminal_proxy" else float(terminal)
-                    )
+                    if reward_mode in ("recorded_sparse", "last_gripper_release_sparse"):
+                        reward = float(step == reward_offsets[episode_id])
+                    else:
+                        reward = float(terminal)
+                        if reward_mode == "episode_end_shaped":
+                            config = reward_config or {}
+                            if terminal:
+                                reward -= float(config.get("lambda_penalty", 0.05)) * (
+                                    (end - start) / int(config.get("max_episode_len", 2000))
+                                )
+                            if previous_action is not None:
+                                reward -= float(config.get("smooth_penalty", 0.01)) * np.linalg.norm(
+                                    current["action"] - previous_action
+                                )
                     episode_rewards.append(reward)
+                    previous_action = np.array(current["action"], copy=True)
                     if pending is not None:
                         writer.append({
                             "state": pending["state"], "next_state": current["state"],
@@ -998,7 +1017,8 @@ def main() -> None:
     parser.add_argument("--lerobot-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reward-mode", choices=(
-        "recorded_sparse", "last_gripper_release_sparse", "terminal_proxy"
+        "recorded_sparse", "last_gripper_release_sparse", "episode_end_shaped",
+        "terminal_proxy"
     ),
                         default="recorded_sparse")
     parser.add_argument("--reward-json", type=Path)
@@ -1015,6 +1035,9 @@ def main() -> None:
     parser.add_argument("--reward-min-dwell", type=int, default=3)
     parser.add_argument("--reward-expected-cycles", type=int, default=1)
     parser.add_argument("--reward-source", choices=("auto", "recorded", "computed"), default="auto")
+    parser.add_argument("--lambda-penalty", type=float, default=0.05)
+    parser.add_argument("--smooth-penalty", type=float, default=0.01)
+    parser.add_argument("--max-episode-len", type=int, default=2000)
     args = parser.parse_args()
     root = args.lerobot_root.expanduser().resolve()
     if not (root / "meta" / "info.json").is_file():
@@ -1040,6 +1063,9 @@ def main() -> None:
             "reward_min_dwell": args.reward_min_dwell,
             "reward_expected_cycles": args.reward_expected_cycles,
             "reward_source": args.reward_source,
+            "lambda_penalty": args.lambda_penalty,
+            "smooth_penalty": args.smooth_penalty,
+            "max_episode_len": args.max_episode_len,
         },
     )
     print(f"[PASS] Created offline Zarr cache: {output}")
