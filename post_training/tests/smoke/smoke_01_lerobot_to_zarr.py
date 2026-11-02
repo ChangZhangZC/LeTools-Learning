@@ -69,6 +69,16 @@ class LeRobotToZarrTest(unittest.TestCase):
         self.labels = self.path / "reward.json"
         _recorded_json(self.labels)
 
+    def test_reject_zarr3_with_actionable_error(self):
+        from unittest.mock import patch
+
+        with patch.object(zarr, "__version__", "3.4.2"):
+            with self.assertRaisesRegex(RuntimeError, "zarr==2.18.7"):
+                convert_dataset(
+                    _Dataset(), self.path / "cache.zarr", reward_json=self.labels
+                )
+        self.assertFalse((self.path / "cache.zarr").exists())
+
     def test_episode_ranges_and_offsets(self):
         dataset = _Dataset()
         self.assertEqual(episode_ranges(dataset.hf_dataset["episode_index"]), [
