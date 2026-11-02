@@ -44,7 +44,7 @@ class RL100DataContractTest(unittest.TestCase):
         self.assertEqual(tuple(result["action"].shape), (2, 7, 18))
         self.assertEqual(result["obs"]["rgb_head"].dtype, torch.float32)
         self.assertEqual(result["obs"]["rgb_head"].max().item(), 1.0)
-        self.assertEqual(result["obs"]["rgb_right_hand"][0, 0, 0, 0, 0].item(), 128 / 255)
+        self.assertAlmostEqual(result["obs"]["rgb_right_hand"][0, 0, 0, 0, 0].item(), 128 / 255, places=6)
         self.assertTrue(torch.equal(src["obs"]["head_rgb"], original))
         self.assertEqual(set(result), {"obs", "action"})
 
