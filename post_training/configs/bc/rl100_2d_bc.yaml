@@ -1,0 +1,42 @@
+# Batch 02: native RL1002D BC-only (original RL-100 train.py BC loss/optimizer/scheduler/EMA).
+# Zarr is the existing derived cache, not source of truth.
+data:
+  zarr: data/zarr/icra_task1_10bags_parity.zarr
+  horizon: 9
+  n_obs_steps: 2
+  n_action_steps: 4
+  val_ratio: 0.2
+  seed: 42
+  pad_before: 0
+  pad_after: 0
+policy:
+  # Original config is much larger; see RL-100/rl_100/config/rl100_2d_epsilon.yaml.
+  # Keep the real-data smoke architecture first, to isolate optimizer/checkpoint integration.
+  resize: 84
+  down_dims: [32, 64, 128]
+  diffusion_step_embed_dim: 32
+  num_train_timesteps: 10
+  num_inference_steps: 2
+  share_rgb_model: true
+  use_group_norm: false
+  action_norm: true
+training:
+  device: cuda:0
+  epochs: 1
+  batch_size: 2
+  num_workers: 0
+  lr: 0.0001
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+  lr_scheduler: cosine
+  lr_warmup_steps: 0
+  use_ema: true
+  ema_power: 0.75
+  ema_max_value: 0.9999
+  # 1 step for first real-data training/checkpoint acceptance; null for full epochs
+  max_train_steps_per_epoch: 1
+  max_val_steps: 1
+  checkpoint_every: 1
+output:
+  dir: outputs/train/rl100_bc_batch02
