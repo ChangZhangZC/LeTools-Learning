@@ -34,7 +34,7 @@ def check_imports() -> None:
     for name in MODULES:
         module = importlib.import_module(name)
         path = Path(module.__file__).resolve()
-        if not path.is_relative_to(RL100_ROOT.resolve()):
+        if RL100_ROOT.resolve() not in path.parents:
             raise RuntimeError(f"Wrong RL-100 import location for {name}: {path}")
         print(f"[PASS] import {name}")
 
