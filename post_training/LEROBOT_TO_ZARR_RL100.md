@@ -75,6 +75,26 @@ not a replacement for ARBiM Reward V2 and **must not feed PPO training as
 if it were an observed success signal**. Teleop-only computed Reward V2
 detection and mixed recorded/computed rewards are **not yet migrated**.
 
+## Zarr 2.x environment requirement
+
+This converter uses Zarr 2.x `Group.create_dataset`, Blosc compressor
+arguments, and the existing `jpeg_bytes_v1` schema; it does not support
+the Zarr 3 Python API. If imports succeed but the writer errors with
+`'Group' object has no attribute 'create_dataset'`, check the runtime:
+
+```bash
+python -c "import zarr,numcodecs; print(zarr.__version__,numcodecs.__version__,zarr.__file__)"
+python -m pip install "zarr==2.18.7" "numcodecs==0.15.1"
+python -m pip check
+python post_training/tests/smoke/smoke_01_lerobot_to_zarr.py
+```
+
+The code now fails early with an actionable error on incompatible versions.
+Do not substitute `create_array` without redesigning and retesting the
+storage/compression contract. LeRobot 0.5.2 requires Python 3.12 and
+NumPy 2.x but does not itself pin Zarr; any incompatible upgrade should
+be diagnosed separately.
+
 ## Run on the server
 
 ```bash
