@@ -51,7 +51,7 @@ def main():
             raise AssertionError(f"{label}: expected (epoch=2,step=4), got {(epoch, step)}")
     assert_same(continuous["state_dicts"], resumed["state_dicts"], "state_dicts")
     for key in ("epoch", "global_step", "ema_optimization_step", "ema_decay",
-                "rng_state", "best_val_loss"):
+                "rng_state"):
         if key not in continuous["pickles"] or key not in resumed["pickles"]:
             raise AssertionError(f"Missing continuation key {key}")
         assert_same(
@@ -59,6 +59,14 @@ def main():
             dill.loads(resumed["pickles"][key]),
             f"pickles.{key}",
         )
+    # Earlier accepted checkpoints predate best-val selection; keep the
+    # existing exact-resume test valid for those saved server artifacts.
+    k = "best_val_loss"
+    if (k in continuous["pickles"]) != (k in resumed["pickles"]):
+        raise AssertionError("Only one run records best-val state")
+    if k in continuous["pickles"]:
+        assert_same(dill.loads(continuous["pickles"][k]),
+                    dill.loads(resumed["pickles"][k]), "pickles.best_val_loss")
     for path in ("best.ckpt",):
         left = args.continuous.with_name(path)
         right = args.resumed.with_name(path)
