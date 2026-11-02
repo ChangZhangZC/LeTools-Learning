@@ -287,6 +287,19 @@ def merge_zarr_datasets(config):
         out.attrs["rgb_dtype"] = first_attrs.get("rgb_dtype", "uint8")
         out.attrs["reward_mode"] = sources[0]["reward_mode"]
         out.attrs["return_gamma"] = gamma
+        # Minimal LeTools contract adaptation: never lose or invent Reward
+        # validity metadata when merging new ARBiM converter outputs.
+        validated = [source["root"].attrs.get("reward_validated") for source in sources]
+        if any(flag is not None for flag in validated):
+            out.attrs["reward_validated"] = all(flag is True for flag in validated)
+        reward_sources = {source["root"].attrs.get("reward_source") for source in sources}
+        if len(reward_sources) == 1:
+            reward_source = next(iter(reward_sources))
+            if reward_source is not None:
+                out.attrs["reward_source"] = reward_source
+        for key in ("state_dim", "action_dim", "use_depth"):
+            if key in first_attrs:
+                out.attrs[key] = first_attrs[key]
         manifests = []
         merge_inputs = []
         for source in sources:
@@ -298,6 +311,12 @@ def merge_zarr_datasets(config):
                 "frames": source["frames"],
                 "episodes": len(source["ends"]),
                 "reward_mode": source["reward_mode"],
+                # Keep each input's local Reward V2 indices under its input
+                # record; do not pretend they are already globally rebased.
+                "reward_source": source["root"].attrs.get("reward_source"),
+                "reward_validated": source["root"].attrs.get("reward_validated"),
+                "reward_event": source["root"].attrs.get("reward_event"),
+                "return_gamma": source["root"].attrs.get("return_gamma"),
             })
         out.attrs["source_manifest"] = manifests
         out.attrs["merge_inputs"] = merge_inputs
