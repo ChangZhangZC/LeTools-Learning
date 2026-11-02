@@ -247,11 +247,9 @@ python post_training/tests/smoke/smoke_02_bc_resume_compare.py \
   --resumed outputs/train/rl100_bc_resumed/checkpoints/latest.ckpt
 ```
 
-## Stable validation and best-checkpoint selection (pending server test)
+## Stable validation and best-checkpoint selection (server smoke passed)
 
-Development: `gpt/rl100-il-validation` → `feature/rl100-il`
-after review, for server validation. **Not yet server-tested.**
-Do not Squash Merge into `arbim/dev` until feature acceptance is complete.
+Implementation integrated into `feature/rl100-il` after review. **The real-Zarr 3-epoch smoke and best-checkpoint test passed on the server.** This does not yet establish production IL convergence or deployment performance. Do not Squash Merge into `arbim/dev` until remaining IL functionality acceptance is complete.
 
 Pooled BC validation uses the original `RL1002D.compute_loss()`,
 without changing the policy or converting validation loss into a task
@@ -300,6 +298,16 @@ python post_training/tests/smoke/smoke_02_bc_best.py \
   --output-dir outputs/train/rl100_bc_validation_trial
 ```
 
+**Observed server acceptance:** `epochs=3`, `steps_per_epoch=12`,
+`global_step=36`; training losses `[1.1090234, 1.0637234, 1.0525346]`,
+held-out `val_loss` `[1.0654494, 1.0489187, 1.0457117]`.
+The smoke reported `[PASS] metrics epochs=3, latest_epoch=3`,
+`[PASS] best validation epoch=3, loss=1.045712`, and
+confirmed both Checkpoints contain native RL1002D and optimizer states.
+The cosine LR reaching zero after its final scheduled step is
+expected. These are only three short epochs on eight training
+episodes; no success-rate claims are supported.
+
 The existing 2-epoch exact Resume acceptance can be repeated on fresh
 output directories with the new metric/best code, and
 `smoke_02_bc_resume_compare.py` now also compares saved
@@ -320,9 +328,10 @@ not for PPO rewards.
 1. One-step real-data train/optimizer/checkpoint smoke: **passed**.
 2. Independent `smoke_02_bc_checkpoint.py` strict reload: **passed**.
 3. Feature ownership: `feature/rl100-il` (not `feature/rl100-data`).
-4. Both the one-step BC trainer and exact multi-epoch resume passed
-   server tests on the 10-episode data cache. The new validation and
-   best-checkpoint capability below still requires server acceptance.
-   When all IL requirements are validated, **Squash Merge**
+4. One-step BC, exact multi-epoch Resume, and the new three-epoch
+   Validation/Best-Checkpoint trial **passed server tests**. The
+   combined new-validation + resumed-training equality regression
+   remains to be rechecked on fresh outputs. Once IL functionality
+   is fully accepted, **Squash Merge**
    `feature/rl100-il` → `arbim/dev`; never merge `gpt/**` directly.
    PPO/IQL/Dynamics and online MuJoCo remain separate later batches.
