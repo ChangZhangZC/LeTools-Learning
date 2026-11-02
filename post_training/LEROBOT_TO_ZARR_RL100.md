@@ -95,6 +95,24 @@ storage/compression contract. LeRobot 0.5.2 requires Python 3.12 and
 NumPy 2.x but does not itself pin Zarr; any incompatible upgrade should
 be diagnosed separately.
 
+## Local data location for this integration
+
+The canonical local datasets and derived Zarr caches now belong under
+`LeTools-Learning/data/` (see `data/README.md`). For the current
+10-bag test dataset:
+
+```bash
+python post_training/src/arbim_rl100/data/lerobot_to_zarr.py \
+  --lerobot-root data/lerobot/icra_task1_10bags \
+  --output data/zarr/icra_task1_10bags.zarr \
+  --reward-mode terminal_proxy
+```
+
+Run logs, metrics and videos still belong under `outputs/`. The Git
+change only establishes the local directory contract; it does not
+copy files from the user's server automatically. Existing valid
+`outputs/test/*.zarr` may be moved to `data/zarr/` after verification.
+
 ## Run on the server
 
 ```bash
