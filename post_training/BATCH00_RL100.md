@@ -54,6 +54,20 @@ python post_training/tests/smoke/smoke_00_rl100_runtime.py --level forward --dev
 
 This is a genuine, compiled `pytorch3d` package containing the operators bundled by RL-100, **not** a compatibility shim. Do not run RL-100's full requirements installer in the existing LeTools environment. The source was originally validated upstream with Python 3.8 and PyTorch 2.4, not Python 3.12; if compilation fails, capture the full build log and check PyTorch/CUDA/compiler compatibility before changing versions. There is no claim that installation has been validated on the target server.
 
+### Legacy Gym dependency encountered in RL-100 import chain
+
+RL1002D -> `unidpg.critic` -> `unidpg.buffer` -> `unidpg.utils` imports the **`gym`** package, which is different from LeTools' `gymnasium`. The incremental requirements now pin `gym==0.26.2`, rather than installing the old vendored Gym 0.21 from RL-100's Python 3.8 environment.
+
+Install just the newly discovered package if PyTorch3D is already working:
+
+```bash
+python -m pip install "gym==0.26.2"
+python -c "import gym; print('gym', gym.__version__)"
+python post_training/tests/smoke/smoke_00_rl100_runtime.py --level imports
+```
+
+**Compatibility limit:** gym 0.26 changed the reset/step API from RL-100's legacy environment assumptions. This fixes the import dependency only; it does not validate RL-100's original Gym environments or online rollout. Online training must use an adapted, tested environment contract. Avoid downgrading LeTools' existing Gymnasium or NumPy just to satisfy this import.
+
 ## Environment compatibility gate
 
 LeTools' currently pinned LeRobot version is not the same as RL-100's documented environment. In particular, `pytorch3d.ops` is imported unconditionally by `rl100_2d.py`, even for 2D-only use. Do not assume successful git submodule initialization implies import or forward compatibility.
