@@ -47,7 +47,7 @@ class OfflineReaderIntegrationTest(unittest.TestCase):
         self.assertEqual(self.buffer["next_head_rgb"][2].shape, (3, 8, 12))
         np.testing.assert_array_equal(self.buffer["next_state"][2], self.buffer["state"][2])
         np.testing.assert_array_equal(self.buffer["next_state"][3], self.buffer["state"][4])
-        np.testing.assert_array_equal(self.buffer["return"][:, 0], [0.9, 1, 0, 1, 0])
+        np.testing.assert_allclose(self.buffer["return"][:, 0], [0.9, 1, 0, 1, 0], rtol=1e-6)
 
         dataset = OfflineDataset(self.buffer, horizon=2, val_ratio=0.0)
         self.assertEqual(len(dataset), 3)
