@@ -1,0 +1,297 @@
+"""Batch 02: BC-only entrypoint for the pinned, unmodified RL1002D.
+
+Preserves RL-100/train.py stage-1 BC: policy.compute_loss, AdamW,
+get_scheduler, EMAModel, and its checkpoint payload layout. Unlike the
+upstream combined Workspace, does not initialize Critic/PPO/Dynamics/env.
+Run from the LeTools-Learning repository root:
+  python post_training/src/arbim_rl100/train_bc.py --config post_training/configs/bc/rl100_2d_bc.yaml
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import math
+import random
+import sys
+from pathlib import Path
+
+import dill
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "post_training" / "src"))
+sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
+
+from arbim_rl100.data.batch_adapter import adapt_rl100_shape_meta, to_rl100_bc_batch
+from arbim_rl100.data.offline_buffer import OfflineBuffer
+from arbim_rl100.data.offline_dataset import OfflineDataset
+from rl_100.model.common.lr_scheduler import get_scheduler
+from rl_100.model.common.normalizer import LinearNormalizer
+from rl_100.model.diffusion.ema_model import EMAModel
+from rl_100.model.vision.model_getter import get_resnet
+from rl_100.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
+from rl_100.policy.rl100_2d import RL1002D
+from rl_100.unidpg.diffusion_policy.diffusers_patch.ddim_with_logprob_dpok import (
+    DDIMSchedulerExtended,
+)
+
+CAMERAS = {
+    "rgb_head": "head_rgb",
+    "rgb_left_hand": "wrist_left_rgb",
+    "rgb_right_hand": "wrist_right_rgb",
+}
+
+
+def fit_train_normalizer(buffer: OfflineBuffer, train_mask: np.ndarray) -> LinearNormalizer:
+    # Same train-episode-only fitting contract validated in smoke_01_real_bc.py.
+    indices, start = [], 0
+    for selected, end in zip(train_mask, buffer.episode_ends, strict=True):
+        if selected:
+            indices.append(np.arange(start, int(end), dtype=np.int64))
+        start = int(end)
+    if not indices:
+        raise ValueError("No training episodes available for normalizer fitting")
+    selected = np.concatenate(indices)
+    norm = LinearNormalizer()
+    norm.fit({"agent_pos": buffer["state"][selected], "action": buffer["action"][selected]},
+             mode="limits")
+    return norm
+
+
+def shape_meta_from_buffer(buffer: OfflineBuffer):
+    meta = {"obs": {
+        name: {"shape": list(buffer[source].shape[1:]), "type": "rgb"}
+        for name, source in CAMERAS.items()
+    }, "action": {"shape": [int(buffer["action"].shape[-1])]}}
+    meta["obs"]["agent_pos"] = {
+        "shape": [int(buffer["state"].shape[-1])], "type": "low_dim"
+    }
+    return adapt_rl100_shape_meta(meta)
+
+
+def build_policy(cfg, shape_meta):
+    # Identical actor configuration to the successfully verified Batch 01D
+    # real-data smoke, with its numeric choices read from the BC YAML.
+    obs_encoder = MultiImageObsEncoder(
+        shape_meta=shape_meta,
+        rgb_model=get_resnet("resnet18", weights=None),
+        resize_shape=(int(cfg.policy.resize), int(cfg.policy.resize)),
+        crop_shape=None,
+        random_crop=False,
+        use_group_norm=bool(cfg.policy.use_group_norm),
+        share_rgb_model=bool(cfg.policy.share_rgb_model),
+        imagenet_norm=True,
+        use_agent_pos=True,
+        use_vib=False,
+        use_recon=False,
+    )
+    scheduler = DDIMSchedulerExtended(
+        num_train_timesteps=int(cfg.policy.num_train_timesteps),
+        beta_schedule="squaredcos_cap_v2",
+        prediction_type="epsilon",
+        clip_sample=True,
+        clip_std_min=0.01,
+    )
+    return RL1002D(
+        shape_meta=shape_meta,
+        obs_encoder=obs_encoder,
+        cm_noise_scheduler=None,
+        ddim_noise_scheduler=scheduler,
+        scheduler_type="ddim",
+        model="sample_dp3",
+        feature_type="2D",
+        w_pc=False,
+        use_agent_pos=True,
+        obs_as_global_cond=True,
+        action_norm=bool(cfg.policy.action_norm),
+        horizon=int(cfg.data.horizon),
+        n_obs_steps=int(cfg.data.n_obs_steps),
+        n_action_steps=int(cfg.data.n_action_steps),
+        num_inference_steps=int(cfg.policy.num_inference_steps),
+        ddim_inference_steps=int(cfg.policy.num_inference_steps),
+        down_dims=tuple(int(x) for x in cfg.policy.down_dims),
+        diffusion_step_embed_dim=int(cfg.policy.diffusion_step_embed_dim),
+        kernel_size=3,
+        n_groups=8,
+        use_aug=False,
+    )
+
+
+def bc_batch(sample, n_obs_steps, device):
+    adapted = to_rl100_bc_batch(sample, n_obs_steps=n_obs_steps)
+    return {
+        "obs": {k: v.to(device, non_blocking=True) for k, v in adapted["obs"].items()},
+        "action": adapted["action"].to(device, non_blocking=True),
+    }
+
+
+def checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler, epoch, global_step):
+    # RL-100 TrainDP3Workspace.save_checkpoint shape: cfg/state_dicts/pickles.
+    # This is a BC-only workspace; it cannot instantiate the full original
+    # TrainDP3Workspace without Critic/Dynamics/PPO/task configuration.
+    states = {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+              "lr_scheduler": lr_scheduler.state_dict()}
+    if ema_model is not None:
+        states["ema_model"] = ema_model.state_dict()
+    return {
+        "cfg": cfg, "state_dicts": states,
+        "pickles": {"epoch": dill.dumps(epoch), "global_step": dill.dumps(global_step)},
+    }
+
+
+def load_checkpoint(path, model, optimizer, ema_model, lr_scheduler):
+    payload = torch.load(path, map_location="cpu", pickle_module=dill)
+    states = payload["state_dicts"]
+    model.load_state_dict(states["model"], strict=True)
+    optimizer.load_state_dict(states["optimizer"])
+    lr_scheduler.load_state_dict(states["lr_scheduler"])
+    if ema_model is not None:
+        ema_model.load_state_dict(states["ema_model"], strict=True)
+    elif "ema_model" in states:
+        raise ValueError("Checkpoint expects an EMA model; enable training.use_ema")
+    return (
+        int(dill.loads(payload["pickles"]["epoch"])),
+        int(dill.loads(payload["pickles"]["global_step"])),
+    )
+
+
+def train(cfg, resume: Path | None = None):
+    seed = int(cfg.data.seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    device = torch.device(str(cfg.training.device))
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but not available")
+    torch.set_num_threads(min(torch.get_num_threads(), 4))
+
+    zarr_path = Path(cfg.data.zarr).expanduser()
+    if not zarr_path.is_dir():
+        raise FileNotFoundError(f"Missing offline Zarr: {zarr_path}")
+    output = Path(cfg.output.dir).expanduser()
+    checkpoint = output / "checkpoints" / "latest.ckpt"
+    if checkpoint.exists() and resume is None:
+        raise FileExistsError(
+            f"{checkpoint} already exists; specify --resume to continue "
+            "or choose another output.dir"
+        )
+    epochs = int(cfg.training.epochs)
+    if epochs < 1 or int(cfg.training.batch_size) < 1:
+        raise ValueError("epochs and batch_size must be positive")
+    if int(cfg.training.checkpoint_every) < 1:
+        raise ValueError("checkpoint_every must be positive")
+
+    buffer = OfflineBuffer(device=torch.device("cpu"), gamma=0.99, use_depth=False)
+    buffer.load_zarr(str(zarr_path.resolve()))
+    dataset = OfflineDataset(
+        buffer, horizon=int(cfg.data.horizon), pad_before=int(cfg.data.pad_before),
+        pad_after=int(cfg.data.pad_after), seed=seed, val_ratio=float(cfg.data.val_ratio),
+    )
+    val_dataset = dataset.get_validation_dataset()
+    if len(dataset) == 0:
+        raise ValueError("No train windows; check horizon and episode lengths")
+    train_loader = DataLoader(
+        dataset, batch_size=int(cfg.training.batch_size), shuffle=True,
+        num_workers=int(cfg.training.num_workers), pin_memory=device.type == "cuda",
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=int(cfg.training.batch_size), shuffle=False,
+        num_workers=int(cfg.training.num_workers), pin_memory=device.type == "cuda",
+    )
+    n_obs_steps = int(cfg.data.n_obs_steps)
+    model = build_policy(cfg, shape_meta_from_buffer(buffer))
+    model.set_normalizer(fit_train_normalizer(buffer, dataset.train_mask))
+    model.to(device)
+    ema_model = copy.deepcopy(model) if cfg.training.use_ema else None
+    ema = None
+    if ema_model is not None:
+        ema = EMAModel(
+            model=ema_model, update_after_step=0, inv_gamma=1.0,
+            power=float(cfg.training.ema_power),
+            min_value=0.0, max_value=float(cfg.training.ema_max_value),
+        )
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=float(cfg.training.lr),
+        betas=tuple(float(v) for v in cfg.training.betas),
+        eps=float(cfg.training.eps),
+        weight_decay=float(cfg.training.weight_decay),
+    )
+    max_steps = cfg.training.max_train_steps_per_epoch
+    steps_per_epoch = min(len(train_loader), int(max_steps)) if max_steps is not None else len(train_loader)
+    if steps_per_epoch < 1:
+        raise ValueError("max_train_steps_per_epoch must be positive")
+    lr_scheduler = get_scheduler(
+        str(cfg.training.lr_scheduler), optimizer=optimizer,
+        num_warmup_steps=int(cfg.training.lr_warmup_steps),
+        num_training_steps=steps_per_epoch * epochs,
+    )
+    start_epoch, global_step = (0, 0)
+    if resume is not None:
+        start_epoch, global_step = load_checkpoint(
+            resume, model, optimizer, ema_model, lr_scheduler
+        )
+        print(f"[PASS] Restored epoch={start_epoch}, global_step={global_step}")
+    print(f"Train episodes={int(dataset.train_mask.sum())}; "
+          f"train windows={len(dataset)}; val windows={len(val_dataset)}; "
+          f"steps/epoch={steps_per_epoch}")
+    output.mkdir(parents=True, exist_ok=True)
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        train_losses = []
+        for step, sample in enumerate(tqdm(train_loader, desc=f"Training epoch {epoch}")):
+            batch = bc_batch(sample, n_obs_steps, device)
+            raw_loss, details = model.compute_loss(batch)
+            if not torch.isfinite(raw_loss).all().item():
+                raise FloatingPointError(f"Nonfinite BC loss on epoch={epoch} step={step}")
+            raw_loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            lr_scheduler.step()
+            if ema is not None:
+                ema.step(model)
+            global_step += 1
+            train_losses.append(raw_loss.item())
+            if step + 1 >= steps_per_epoch:
+                break
+        if not train_losses:
+            raise RuntimeError("No BC training steps executed")
+        result = {"train_loss": float(np.mean(train_losses)),
+                  "global_step": global_step, "epoch": epoch}
+        if len(val_loader) > 0 and cfg.training.max_val_steps != 0:
+            model.eval()
+            val_losses = []
+            with torch.no_grad():
+                for step, sample in enumerate(val_loader):
+                    loss, _ = model.compute_loss(bc_batch(sample, n_obs_steps, device))
+                    val_losses.append(loss.item())
+                    if cfg.training.max_val_steps is not None and step + 1 >= int(cfg.training.max_val_steps):
+                        break
+            result["val_loss"] = float(np.mean(val_losses))
+        print(f"[BC] {result}")
+        if (epoch + 1) % int(cfg.training.checkpoint_every) == 0:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                checkpoint_payload(cfg, model, optimizer, ema_model, lr_scheduler,
+                                   epoch + 1, global_step),
+                checkpoint, pickle_module=dill,
+            )
+            print(f"[PASS] Saved BC checkpoint: {checkpoint}")
+    return checkpoint
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--resume", type=Path, default=None)
+    args = parser.parse_args()
+    train(OmegaConf.load(args.config), resume=args.resume)
+
+
+if __name__ == "__main__":
+    main()
