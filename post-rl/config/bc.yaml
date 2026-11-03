@@ -1,0 +1,34 @@
+# Feature 03: initial one-step BC smoke preset, NOT final training settings.
+# The LeRobot metadata determines every robot state/action/image dimension.
+data:
+  repo_id: "local/icra_task1_10bags"
+  root: "/root/bayes-tmp/kuavo_dataset/icra_task1_lerobot_jiayi_10bags/lerobot_v3.0"
+  video_backend: "pyav"
+  n_obs_steps: 2
+  horizon: 9          # native RL100 no_pre_action=True => 8 denoising steps
+  n_action_steps: 4
+policy:
+  resize: 128         # visual encoder processing size, NOT dataset image size
+  share_rgb_model: true
+  use_group_norm: false
+  num_train_timesteps: 10
+  num_inference_steps: 2
+  down_dims: [32, 64, 128]
+  diffusion_step_embed_dim: 32
+  kernel_size: 3
+  n_groups: 8
+training:
+  device: "cuda:0"
+  seed: 42
+  steps: 1           # increase only after smoke passes
+  batch_size: 1
+  num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.000001
+  lr_scheduler: "cosine"
+  lr_warmup_steps: 0
+  use_ema: false
+  ema_power: 0.6666667
+  save_every: 1
+output:
+  dir: "post_traing/outputs/feature03_bc"
