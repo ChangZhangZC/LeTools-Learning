@@ -96,7 +96,21 @@ class RL1002DKuavoAdapter(ModelServerAdapter):
             raise ValueError("Checkpoint n_action_steps must be positive")
         if execution_horizon > self.model_n_action_steps:
             raise ValueError("execution_horizon exceeds trained n_action_steps")
-        self.execution_horizon = execution_horizon or self.model_n_action_steps
+        # Native Kuavo PolicyClient caches actions locally and sends no new
+        # observations while its chunk is being executed. With To>1, a chunk
+        # longer than one step would turn the next 'previous frame' into a
+        # frame from multiple control cycles ago, unlike the BC training data.
+        # Preserve exact consecutive-step observation semantics without
+        # modifying LeTools' client by returning one action per request.
+        if self.n_obs_steps > 1 and execution_horizon > 1:
+            raise ValueError(
+                "With n_obs_steps>1, execution_horizon must be 1: Kuavo "
+                "PolicyClient does not forward intermediate observations "
+                "while caching multi-step chunks."
+            )
+        self.execution_horizon = (
+            1 if self.n_obs_steps > 1 else self.model_n_action_steps
+        ) if execution_horizon == 0 else execution_horizon
         self.which_arm = which_arm
         self.resize_images = resize_images
 
@@ -156,7 +170,8 @@ class RL1002DKuavoAdapter(ModelServerAdapter):
         parser.add_argument("--checkpoint", required=True, help="Feature03 latest.pt path")
         parser.add_argument("--device", default="cuda:0")
         parser.add_argument("--execution_horizon", type=int, default=0,
-                            help="0 uses trained n_action_steps; cannot exceed it")
+                            help="0=1 when n_obs_steps>1 (fresh obs each step), "
+                                 "else trained n_action_steps")
         parser.add_argument("--which_arm", choices=["left", "right", "both"], default="both",
                             help="Metadata label only. Does NOT slice or remap checkpoint actions.")
         parser.add_argument("--binary_action_names", default="",
