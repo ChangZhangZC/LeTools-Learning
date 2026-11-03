@@ -29,6 +29,15 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "post-rl" / "src"))
+# LeTools tracks LeRobot as a pinned source submodule. The standalone local
+# test must find that checkout even when LeRobot is not pip-installed.
+LEROBOT_SRC = ROOT / "third_party" / "lerobot" / "src"
+if not (LEROBOT_SRC / "lerobot").is_dir():
+    raise FileNotFoundError(
+        f"LeRobot checkout missing: {LEROBOT_SRC}. "
+        "Run: git submodule update --init third_party/lerobot"
+    )
+sys.path.insert(0, str(LEROBOT_SRC))
 
 from kuavo_deploy.kuavo_service.client import PolicyClient, TorchSerializer  # noqa: E402
 from rl100_compat.lerobot_data import open_lerobot_bc_dataset  # noqa: E402
