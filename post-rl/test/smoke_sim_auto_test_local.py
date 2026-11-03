@@ -18,7 +18,7 @@ import socket
 import subprocess
 import sys
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -123,10 +123,32 @@ def _raise_unexpected_ros(name):
     raise RuntimeError(f"Local-only test forbids ROS/native call: {name}")
 
 
+@contextmanager
+def _temporary_import_stubs(stubs):
+    """Replace only named ROS/sim modules; retain unrelated real imports.
+
+    unittest.mock.patch.dict(sys.modules, ...) restores the ENTIRE module
+    dictionary on exit. Imports made by sim_auto_test.py (notably torchvision)
+    then disappear while their PyTorch operator registrations persist,
+    causing a duplicate torchvision::roi_align Meta kernel on re-import.
+    """
+    missing = object()
+    originals = {name: sys.modules.get(name, missing) for name in stubs}
+    try:
+        sys.modules.update(stubs)
+        yield
+    finally:
+        for name, original in originals.items():
+            if original is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+
+
 def load_real_sim_auto_test_without_ros():
     if not SCRIPT.is_file():
         raise FileNotFoundError(SCRIPT)
-    with patch.dict(sys.modules, _fake_import_modules()):
+    with _temporary_import_stubs(_fake_import_modules()):
         namespace = runpy.run_path(str(SCRIPT), run_name="arbim_sim_auto_test_local")
     for name in ("setup_policy", "run_single_episode"):
         if name not in namespace:
