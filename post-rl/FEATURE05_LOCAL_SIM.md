@@ -9,7 +9,13 @@ PolicyClient, serve.py, original RL-100 or native algorithms.
 ## What actually runs
 
 The local test imports sim_auto_test.py (no copied eval logic) using
-local-process stubs for ROS and simulation-only modules. It calls the
+local-process stubs for ROS and simulation-only modules.
+It adds third_party/lerobot/src to its own Python import path so the pinned
+LeRobot source is used even when the package is not installed in the selected
+environment. Before running, initialize the checkout with
+git submodule update --init third_party/lerobot.
+Run the commands from the LeTools-enabled conda environment (e.g.
+conda activate letools_chang), not the base environment. It calls the
 actual setup_policy(policy_type="client") and run_single_episode(...)
 with gym.make("Kuavo-Sim") replaced by a fake in-memory gym environment.
 That fake returns REAL 10-bag LeRobot v3 RGB/state observations. Its
