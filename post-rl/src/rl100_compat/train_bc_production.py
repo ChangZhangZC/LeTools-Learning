@@ -217,13 +217,9 @@ def _resume_signature(cfg) -> dict:
         "training": {k: tr[k] for k in (
             "steps", "seed", "batch_size", "lr", "weight_decay",
             "lr_scheduler", "lr_warmup_steps", "use_ema",
-            "ema_power", "max_grad_norm",
+            "ema_power", "max_grad_norm", "val_every",
         )},
-        "validation": {
-            "fraction": float(cfg.validation.fraction),
-            "split_seed": int(cfg.validation.split_seed),
-            "seed": int(cfg.validation.seed),
-        },
+        "validation": OmegaConf.to_container(cfg.validation, resolve=True),
     }
 
 
@@ -343,8 +339,9 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     resume = bool(cfg.training.resume)
     if resume and not paths["latest"].is_file():
         raise FileNotFoundError(f"Missing resume checkpoint: {paths['latest']}")
-    if not resume and (paths["latest"].exists() or paths["best"].exists()):
-        raise FileExistsError("Checkpoint already exists; use a fresh output.dir or resume=true")
+    if not resume and (paths["latest"].exists() or paths["best"].exists()
+                       or paths["metrics"].exists()):
+        raise FileExistsError("Run outputs already exist; use a fresh output.dir or resume=true")
 
     _seed_all(int(cfg.training.seed))
     view = open_lerobot_bc_dataset(
@@ -414,8 +411,12 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         best_loss, best_step = saved["best_val_loss"], saved["best_step"]
         if start_step < 0 or start_step > total_steps:
             raise ValueError("Checkpoint step incompatible with training budget")
-        if best_step is not None and not paths["best"].is_file():
-            raise FileNotFoundError("Best deploy checkpoint missing on resume")
+        if best_step is not None:
+            if not paths["best"].is_file():
+                raise FileNotFoundError("Best deploy checkpoint missing on resume")
+            best_saved = torch.load(paths["best"], map_location="cpu", weights_only=True)
+            if best_saved.get("checkpoint_role") != "deploy_best" or best_saved.get("step") != best_step:
+                raise ValueError("best.pt is inconsistent with latest.pt; inspect interrupted write")
         restore_rng_state(saved["rng_state"])
         _trim_metrics_after_resume(paths["metrics"], start_step)
     else:
@@ -466,7 +467,9 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
 
         if step % int(cfg.training.log_every) == 0 or step == last_step:
             lr = optimizer.param_groups[0]["lr"]
+            epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
             _write_metric(paths["metrics"], phase="train", step=step,
+                          epoch_equivalent=round(epoch_progress, 6),
                           loss=float(loss.item()), lr=float(lr),
                           elapsed_s=round(time.monotonic() - start_time, 3))
             print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
