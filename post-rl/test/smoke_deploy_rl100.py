@@ -49,6 +49,11 @@ def main():
           f"action={md['action_dim']}, cameras={list(md['camera_map'])}")
 
     cfg = adapter.config
+    if int(cfg.data.n_obs_steps) > 1:
+        assert md["execution_horizon"] == 1, (
+            "Multi-step cache would skip intermediate observation frames"
+        )
+        print("[PASS] exact observation-history policy: one action per request")
     dataset = open_lerobot_bc_dataset(
         str(cfg.data.repo_id), str(cfg.data.root),
         n_obs_steps=int(cfg.data.n_obs_steps),
