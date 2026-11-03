@@ -39,6 +39,20 @@ PolicyClient; PolicyClient handles chunk caching. `select_action`
 implements a separate, stepwise fallback cache for direct endpoint users.
 Both caches and the observation window reset across episodes.
 
+**Critical time-window constraint:** Kuavo's existing PolicyClient does NOT
+forward new RGB/state observations while executing cached actions. A policy
+trained with `n_obs_steps=2` expects consecutive observations `t-1,t`.
+If the adapter returned 4 actions at a time, the server would see `t-4,t`
+at the next prediction and incorrectly treat them as adjacent frames.
+With `n_obs_steps>1`, this adapter therefore defaults to and enforces
+`execution_horizon=1`. It still calls the native chunk predictor but
+returns only its first action, forcing the unmodified client to send a new
+observation on every control step. This preserves temporal alignment but
+increases inference requests and latency; measure whether inference fits
+the robot control rate. Full multi-step execution with exact per-step
+observation history requires a separate, explicitly designed interface.
+When `n_obs_steps=1`, full trained chunk execution is permitted.
+
 ## Control semantics: fail closed on unverified differences
 
 The saved metadata contains *ordered* state/action names and dimensions,
