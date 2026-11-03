@@ -13,6 +13,7 @@ sys.path.insert(0, str(HERE))
 
 from smoke_sim_auto_test_local import (  # noqa: E402
     FakeKuavoGymEnv,
+    LEROBOT_SRC,
     SCRIPT,
     load_real_sim_auto_test_without_ros,
 )
@@ -36,6 +37,8 @@ class LocalSimAutoTestTests(unittest.TestCase):
         # Importing sim_auto_test loads torchvision. It must remain cached
         # after the temporary ROS stubs are removed; otherwise reimport
         # re-registers torchvision::roi_align Meta and fails in PyTorch.
+        self.assertTrue((LEROBOT_SRC / "lerobot").is_dir())
+        self.assertIn(str(LEROBOT_SRC), sys.path)
         self.assertIn("torchvision", sys.modules)
         self.assertIn("torchvision._meta_registrations", sys.modules)
         from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
