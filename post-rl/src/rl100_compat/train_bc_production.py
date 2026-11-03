@@ -396,12 +396,17 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         if saved["state_names"] != list(view.contract.state_names) or saved["action_names"] != list(view.contract.action_names):
             raise ValueError("Robot state/action names changed since checkpoint")
         model.load_state_dict(saved["model"], strict=True)
+        # RL100's DictOfTensorMixin._load_from_state_dict creates fresh CPU
+        # ParameterDict tensors for its normalizer. Move the complete restored
+        # module back to the training device AFTER strict load.
+        model.to(device)
         optimizer.load_state_dict(saved["optimizer"])
         scheduler.load_state_dict(saved["lr_scheduler"])
         if ema is not None:
             if saved["ema_model"] is None or saved["ema_step"] is None:
                 raise ValueError("EMA weights missing from resumed checkpoint")
             ema.averaged_model.load_state_dict(saved["ema_model"], strict=True)
+            ema.averaged_model.to(device)
             ema.optimization_step = int(saved["ema_step"])
         elif saved["ema_model"] is not None:
             raise ValueError("Unexpected EMA checkpoint for use_ema=false")
