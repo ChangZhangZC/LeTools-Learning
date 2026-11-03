@@ -33,6 +33,13 @@ class LocalSimAutoTestTests(unittest.TestCase):
         self.assertEqual(
             namespace["run_single_episode"].__code__.co_filename, str(SCRIPT)
         )
+        # Importing sim_auto_test loads torchvision. It must remain cached
+        # after the temporary ROS stubs are removed; otherwise reimport
+        # re-registers torchvision::roi_align Meta and fails in PyTorch.
+        self.assertIn("torchvision", sys.modules)
+        self.assertIn("torchvision._meta_registrations", sys.modules)
+        from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
+        self.assertIsNotNone(LeRobotDatasetMetadata)
 
     def test_fake_environment_only_records_actions(self):
         env = FakeKuavoGymEnv(
