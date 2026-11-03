@@ -30,13 +30,13 @@ class FakePolicy:
         return {"action": row.repeat(1, 3, 1)}
 
 
-def fake_adapter():
+def fake_adapter(*, obs_steps=2, execution_horizon=1):
     obj = object.__new__(RL1002DKuavoAdapter)
     obj.state_dim = 4
     obj.action_dim = 4
-    obj.n_obs_steps = 2
+    obj.n_obs_steps = obs_steps
     obj.model_n_action_steps = 3
-    obj.execution_horizon = 3
+    obj.execution_horizon = execution_horizon
     obj.device = torch.device("cpu")
     obj.camera_map = {
         "observation.images.head_cam_h": "rgb_head_cam_h",
@@ -52,7 +52,7 @@ def fake_adapter():
     obj.which_arm = "both"
     obj.checkpoint = Path("fake.pt")
     obj.model = FakePolicy()
-    obj._history = deque(maxlen=2)
+    obj._history = deque(maxlen=obs_steps)
     obj._pending_actions = []
     return obj
 
@@ -76,7 +76,7 @@ class DeployAdapterUnitTests(unittest.TestCase):
     def test_image_and_state_history_reset(self):
         adapter = fake_adapter()
         chunk = adapter.select_action_chunk(obs(1, hwc=True))
-        self.assertEqual(chunk.shape, (3, 4))
+        self.assertEqual(chunk.shape, (1, 4))
         self.assertEqual(chunk.dtype, np.float64)
         self.assertEqual(tuple(adapter.model.last_obs["agent_pos"].shape), (1, 2, 4))
         self.assertEqual(tuple(adapter.model.last_obs["rgb_head_cam_h"].shape), (1, 2, 3, 4, 6))
@@ -90,7 +90,7 @@ class DeployAdapterUnitTests(unittest.TestCase):
         self.assertTrue(torch.all(adapter.model.last_obs["agent_pos"] == 7))
 
     def test_stepwise_fallback_caches_one_chunk(self):
-        adapter = fake_adapter()
+        adapter = fake_adapter(obs_steps=1, execution_horizon=3)
         self.assertEqual(adapter.model.calls, 0)
         for _ in range(3):
             step = adapter.select_action(obs(1))
