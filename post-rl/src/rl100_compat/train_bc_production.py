@@ -361,11 +361,25 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         view, train_ids, int(cfg.data.n_obs_steps), int(cfg.data.horizon))
     val_anchors = episode_anchor_indices(
         view, val_ids, int(cfg.data.n_obs_steps), int(cfg.data.horizon))
-    model = build_policy(cfg, view.contract)
+    saved = None
+    if resume:
+        saved = torch.load(paths["latest"], map_location="cpu", weights_only=True)
+        if saved.get("checkpoint_role") != "training_latest":
+            raise ValueError("Only production latest.pt is resumable (not deploy best.pt)")
+        if saved.get("resume_signature") != _resume_signature(cfg) or saved.get("split") != split:
+            raise ValueError("Checkpoint architecture, data, optimizer, or episode split differs")
+        if dict(saved["camera_map"]) != dict(view.contract.source_to_rgb):
+            raise ValueError("Camera metadata changed between training runs")
+        if saved["state_names"] != list(view.contract.state_names) or saved["action_names"] != list(view.contract.action_names):
+            raise ValueError("Robot state/action names changed since checkpoint")
 
-    # Original actor always owns the normalization. Fit once only on TRAIN
-    # raw proprioception/actions. For resume, restore the saved native tensors.
-    if not resume:
+    model = build_policy(cfg, view.contract)
+    # IMPORTANT: the native DictOfTensorMixin creates new normalizer
+    # ParameterDict tensors when loading a checkpoint. Restore those BEFORE
+    # constructing the optimizer/EMA, or AdamW parameter-group counts differ.
+    if resume:
+        model.load_state_dict(saved["model"], strict=True)
+    else:
         model.set_normalizer(build_train_only_normalizer(view.dataset, train_ids))
     model.to(device)
     ema = None
@@ -386,20 +400,6 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     best_step = None
     start_step = 0
     if resume:
-        saved = torch.load(paths["latest"], map_location="cpu", weights_only=True)
-        if saved.get("checkpoint_role") != "training_latest":
-            raise ValueError("Only production latest.pt is resumable (not deploy best.pt)")
-        if saved.get("resume_signature") != _resume_signature(cfg) or saved.get("split") != split:
-            raise ValueError("Checkpoint architecture, data, optimizer, or episode split differs")
-        if dict(saved["camera_map"]) != dict(view.contract.source_to_rgb):
-            raise ValueError("Camera metadata changed between training runs")
-        if saved["state_names"] != list(view.contract.state_names) or saved["action_names"] != list(view.contract.action_names):
-            raise ValueError("Robot state/action names changed since checkpoint")
-        model.load_state_dict(saved["model"], strict=True)
-        # RL100's DictOfTensorMixin._load_from_state_dict creates fresh CPU
-        # ParameterDict tensors for its normalizer. Move the complete restored
-        # module back to the training device AFTER strict load.
-        model.to(device)
         optimizer.load_state_dict(saved["optimizer"])
         scheduler.load_state_dict(saved["lr_scheduler"])
         if ema is not None:
