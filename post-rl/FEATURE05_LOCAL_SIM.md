@@ -63,6 +63,18 @@ Expected PASS markers:
 - actual sim_auto_test run_single_episode
 - PolicyClient/ZMQ/Checkpoint/Reset/fake-env interface
 
+## Python import isolation
+
+The sim_auto_test.py loader injects temporary ROS/simulator **named modules**
+into sys.modules, and restores only those named keys afterwards. It must
+leave all unrelated Python imports cached. In particular, the original
+sim_auto_test.py imports torchvision; clearing that import and re-importing
+LeRobot's dataset utilities in the same process raises a duplicate
+`torchvision::roi_align` Meta-kernel registration RuntimeError. The local
+unit test now imports native LeRobotDatasetMetadata after sim_auto_test.py
+to catch regression. No dependency reinstallation or torchvision patching
+is required for this test-harness problem.
+
 ## Limitations and acceptance
 
 This is a LOCAL library and network integration test, not an evaluation
