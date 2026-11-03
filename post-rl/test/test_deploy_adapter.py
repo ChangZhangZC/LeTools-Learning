@@ -107,7 +107,7 @@ class DeployAdapterUnitTests(unittest.TestCase):
         adapter.binary_action_names = ("left_claw", "right_claw")
         adapter.binary_action_indices = (1, 3)
         chunk = adapter.select_action_chunk(obs())
-        self.assertEqual(chunk[0].tolist(), [0.1, 0.0, 0.7, 1.0])
+        np.testing.assert_allclose(chunk[0], [0.1, 0.0, 0.7, 1.0], atol=1e-6)
 
     def test_fail_on_missing_camera_state_or_resolution(self):
         adapter = fake_adapter()
