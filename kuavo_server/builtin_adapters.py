@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 
 ADAPTER_MODULES: dict[str, str] = {
+    "rl100_2d": "kuavo_server.adapters.rl100_2d",
     "g05": "kuavo_server.adapters.g05",
     "lingbot_vla": "kuavo_server.adapters.lingbot_vla",
     "lingbot_vla_v2": "kuavo_server.adapters.lingbot_vla_v2",
