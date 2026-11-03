@@ -33,8 +33,16 @@ def main():
                         help="Feature03 small network config; NOT the production-size model")
     parser.add_argument("--output-dir", default="post_traing/outputs/feature06_bc_smoke")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--dataset-root", default=None,
+                        help="Override LeRobot v3 root (e.g. extracted 10-episode subset)")
+    parser.add_argument("--repo-id", default=None,
+                        help="Override local LeRobot repo identifier")
     args = parser.parse_args()
     cfg = OmegaConf.load(args.smoke_config)
+    if args.dataset_root is not None:
+        cfg.data.root = args.dataset_root
+    if args.repo_id is not None:
+        cfg.data.repo_id = args.repo_id
     cfg.training.device = args.device
     cfg.training.steps = 3
     cfg.training.batch_size = 1
