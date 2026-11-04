@@ -1,7 +1,9 @@
 """Verify compact uint8 transport preserves the native RL100 float32 batch."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from torch.utils.data import DataLoader
@@ -9,7 +11,7 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from kuavo_model.rl100_dp_2d.bc_utils import _to_device
-from kuavo_model.rl100_dp_2d.dataset import RL100LeRobotDataset, contract_from_features
+from kuavo_model.rl100_dp_2d.dataset import RL100LeRobotDataset, contract_from_features, open_lerobot_bc_dataset
 
 
 class FakeSource:
@@ -52,6 +54,24 @@ class Uint8TransportTests(unittest.TestCase):
         torch.testing.assert_close(batch["action"], sample["action"])
         torch.testing.assert_close(batch["obs"]["agent_pos"], sample["obs"]["agent_pos"])
         self.assertNotIn("action_is_pad", batch)
+
+    def test_lerobot_ctor_enables_uint8_transport(self):
+        from lerobot.datasets import dataset_metadata, lerobot_dataset
+        class FakeMeta:
+            def __init__(self, repo_id, root):
+                self.features = FakeSource.features
+                self.fps = 10
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "meta").mkdir()
+            (root / "meta/info.json").write_text("{}", encoding="utf-8")
+            with patch.object(dataset_metadata, "LeRobotDatasetMetadata", FakeMeta):
+                with patch.object(lerobot_dataset, "LeRobotDataset", return_value=FakeSource()) as ctor:
+                    view = open_lerobot_bc_dataset("local/test", root, n_obs_steps=2,
+                                                   horizon=5, video_backend="pyav")
+                    self.assertEqual(len(view.contract.source_to_rgb), 2)
+                    self.assertTrue(ctor.call_args.kwargs["return_uint8"])
+                    self.assertEqual(ctor.call_args.kwargs["video_backend"], "pyav")
 
     def test_non_uint8_rgb_rejected_or_preserved_as_float(self):
         raw = FakeSource()
