@@ -349,20 +349,8 @@ def kuavo_eval_autotest(config: KuavoConfig):
     else:
         pretrained_path = Path(f"outputs/train/{cfg.task}/{cfg.method}/{cfg.timestamp}/epoch{cfg.epoch}")
     if policy_type == "rl100_dp_2d":
-        # The native RL100 bundle remains a separate actor format. Keep eval
-        # results isolated per task/method/run/checkpoint, not 'pretrained_model'.
-        model_dir = pretrained_path.expanduser().resolve()
-        if (model_dir.name == "pretrained_model"
-                and model_dir.parent.parent.name == "checkpoints"):
-            checkpoint_dir = model_dir.parent
-            run_dir = checkpoint_dir.parent.parent
-            method_dir = run_dir.parent
-            task_dir = method_dir.parent
-            output_directory = (Path("outputs/eval").resolve() / task_dir.name
-                                / method_dir.name / run_dir.name / checkpoint_dir.name)
-        else:
-            # Backward compatibility with the original flat RL100 export.
-            output_directory = Path("outputs/eval").resolve() / pretrained_path.name
+        from kuavo_model.rl100_dp_2d.eval_policy import resolve_rl100_eval_output_dir
+        output_directory = resolve_rl100_eval_output_dir(pretrained_path)
     else:
         output_directory = resolve_eval_output_dir(pretrained_path, Path("outputs/eval"))
     output_directory.mkdir(parents=True, exist_ok=True)
