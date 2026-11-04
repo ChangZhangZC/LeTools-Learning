@@ -43,5 +43,15 @@ validation:
   seed: 1234              # same diffusion noise every validation for comparability
   batch_size: 8
   max_batches: 0          # 0=all eligible val windows (no padding)
+# Match kuavo_model/train.py: outputs/train/act_YYYYMMDD_HHMMSS and
+# outputs/train/diffusion_YYYYMMDD_HHMMSS. Timestamp is added by the
+# production CLI on fresh runs; resume must use the exact existing run path.
+wandb:
+  enable: false          # ACT defaults true, LeTools diffusion defaults false
+  project: "lerobot_rl100_2d"
+  entity: null
+  mode: "online"         # "online" or "offline"; needs wandb installed if enabled
+tensorboard:
+  enable: false          # optional; needs tensorboard installed if enabled
 output:
-  dir: "post_traing/outputs/rl100_bc_production"
+  dir: "outputs/train/rl100_2d"
