@@ -1,15 +1,17 @@
 # Feature 06 — Production BC baseline for native RL1002D
 
-Status: implementation prepared; **not yet verified on target GPU**.
-This work upgrades the Feature03 minimal BC trainer without touching its
-one-step smoke. The model algorithm stays the unmodified RL-100 RL1002D.
+Status: accepted on the pro6000 GPU using the 10-Episode subset (1,501 frames).
+The native BC model and core trainer behavior were verified with real data,
+EMA, training-state resume and adapter inference. Full 600-Episode training
+and robot performance are NOT evaluated. Previous smoke scripts were cleaned
+up on the subsequent maintenance branch. The model remains unmodified RL1002D.
 
 ## File and compatibility boundary
 
 - NEW: post-rl/src/rl100_compat/train_bc_production.py
 - NEW: post-rl/config/bc_train.yaml
 - NEW: post-rl/test/test_bc_production.py
-- NEW: post-rl/test/smoke_bc_production.py
+- Optional scalar logging: post-rl/src/rl100_compat/bc_logging.py
 - This document: post-rl/FEATURE06_BC_PRODUCTION.md
 
 UNCHANGED: original RL1002D, RL100 compute_loss(), DDIM scheduler,
@@ -67,14 +69,16 @@ multi-worker DataLoaders. Use num_workers=0 for strict resume tests.
 
 post-rl/config/bc.yaml remains Feature03's one-step test preset.
 post-rl/config/bc_train.yaml is a starter production preset; its 100000
-steps and other parameters are NOT tuned for Kuavo.
+steps and other parameters are NOT tuned for Kuavo. It now uses
+n_obs_steps=2, horizon=33 (32 modeled action steps), n_action_steps=16,
+and disables Random Crop in the existing build_policy() helper.
 
 Native RL1002D has no_pre_action=True:
   modeled_denoising_length = horizon - n_obs_steps + 1.
 
 For len(down_dims) blocks, the modeled length must be divisible by
-2**len(down_dims). The starter config uses horizon=17, To=2, resulting
-in 16 modeled action steps, with n_action_steps=8. This differs from the
+2**len(down_dims). The starter config uses horizon=33, To=2, resulting
+in 32 modeled action steps, with n_action_steps=16. This differs from the
 deployment adapter's execution_horizon=1 for consecutive observations.
 Do not confuse diffusion timestep count with optimizer step count.
 
@@ -82,38 +86,18 @@ Do not confuse diffusion timestep count with optimizer step count.
 generalization. Before a real production run, choose your dataset,
 total step budget, model size and GPU/batch budget separately.
 
-## Verify on GPU (run only on feature branch)
+## Current unit tests
 
-    cd /root/bayes-tmp/changzhang/LeTools-Learning
-    conda activate letools_chang
-    git fetch origin
-    git switch feature/rl100-bc-production-v2
-    git pull --ff-only origin feature/rl100-bc-production-v2
-    git submodule update --init third_party/lerobot third_party/rl100
-    mkdir -p post_traing/outputs
-    set -o pipefail
+The old standalone smoke scripts have been retired. Current maintained tests:
 
-    # Pure fake-data unit tests, deterministic full/partial resume
     PYTHONPATH=post-rl/src python -m unittest discover \
-      -s post-rl/test -p test_bc_production.py -v \
-      2>&1 | tee post_traing/outputs/feature06_unit.log
+      -s post-rl/test -p test_bc_production.py -v
 
-    # Real 10-bags: 2 optimizer steps -> resume to 3 -> best EMA deploy
-    python post-rl/test/smoke_bc_production.py \
-      --device cuda:0 \
-      --output-dir post_traing/outputs/feature06_bc_smoke \
-      2>&1 | tee post_traing/outputs/feature06_bc_smoke.log
+    PYTHONPATH=post-rl/src python -m unittest discover \
+      -s post-rl/test -p test_bc_logging.py -v
 
-    # Verify the original Feature03 BC trainer is unchanged
-    python post-rl/test/smoke_bc_real.py \
-      --config post-rl/config/bc.yaml \
-      --output-dir post_traing/outputs/feature03_bc_smoke_f06_regression \
-      2>&1 | tee post_traing/outputs/feature06_feature03_regression.log
-
-The real-data smoke uses the dataset root currently configured in
-post-rl/config/bc.yaml. A missing dataset or model dependencies will
-fail explicitly. Each test uses a fresh output dir; reruns should choose
-another directory, not overwrite a previous checkpoint.
+Historical 10-bag/600-bag extraction notes are archival. Use the
+production entrypoint and latest README for current commands.
 
 ## Full training (after testing and parameter decision)
 
@@ -122,6 +106,13 @@ another directory, not overwrite a previous checkpoint.
 
 To resume interrupted training, preserve output.dir, keep all checked
 settings identical, and use --resume (or training.resume=true in YAML).
+
+Default output matches native LeTools ACT/DP naming. Fresh CLI runs
+append _YYYYMMDD_HHMMSS to outputs/train/rl100_2d. For exact resume,
+provide that run path using --output-dir and --resume.
+
+Optional WandB and TensorBoard sinks (disabled by default) are configured
+through the wandb and tensorboard YAML sections; JSONL remains always on.
 
 Artifacts:
 
@@ -135,8 +126,8 @@ Use best.pt for Kuavo ModelServerAdapter inference; selected EMA
 weights are in its model field. This is NOT physical-robot readiness:
 later Kuavo OpenSource simulation and EEF semantic checks are required.
 
-## Merge policy
+## Integration status
 
-All GPU checks and original Feature03 regression must pass before
-Squash Merge from feature/rl100-bc-production-v2 to arbim/dev.
-The main and arbim/dev-deprecated branches remain untouched.
+Feature06 has already been Squash Merged into arbim/dev via PR #21.
+The logging and smoke-cleanup maintenance branch is separate and remains
+unmerged pending review and updated unit tests.
