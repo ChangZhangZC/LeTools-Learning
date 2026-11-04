@@ -143,6 +143,89 @@ class ProductionBCUnitTests(unittest.TestCase):
         self.assertFalse(bool(cfg.wandb.enable))
         self.assertFalse(bool(cfg.tensorboard.enable))
 
+    def test_steps_epochs_budget_uses_first_limit_and_train_windows_only(self):
+        cfg = config_for_test("fake-output")
+        # 15 training anchors, batch_size=2 => ceil(15/2)=8 steps per epoch.
+        self.assertEqual(prod.resolve_training_budget(cfg, 15), (3, 8))
+        cfg.training.steps = None
+        cfg.training.epochs = 2
+        self.assertEqual(prod.resolve_training_budget(cfg, 15), (16, 8))
+        cfg.training.steps = 20
+        cfg.training.epochs = 1
+        self.assertEqual(prod.resolve_training_budget(cfg, 15), (8, 8))
+        cfg.training.steps = 3
+        self.assertEqual(prod.resolve_training_budget(cfg, 15), (3, 8))
+        cfg.training.steps = None
+        cfg.training.epochs = None
+        with self.assertRaisesRegex(ValueError, "At least one"):
+            prod.check_config(cfg)
+        for key, invalid in (("steps", 0), ("epochs", -1),
+                             ("steps", 1.5), ("epochs", True)):
+            cfg.training.steps, cfg.training.epochs = 3, None
+            cfg.training[key] = invalid
+            with self.subTest(key=key, invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "positive integer or null"):
+                    prod.check_config(cfg)
+        cfg.training.steps = None
+        cfg.training.epochs = 1
+        with self.assertRaisesRegex(ValueError, "train_windows"):
+            prod.resolve_training_budget(cfg, 0)
+
+    def test_epoch_only_training_final_validation_and_exact_resume(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            resumed_cfg = config_for_test(root / "epoch-resume")
+            baseline_cfg = config_for_test(root / "epoch-baseline")
+            for cfg in (resumed_cfg, baseline_cfg):
+                cfg.training.steps = None
+                cfg.training.epochs = 1
+                cfg.training.val_every = 1000
+                cfg.training.save_every = 1000
+
+            with (
+                patch.object(prod, "open_lerobot_bc_dataset", return_value=FakeView()),
+                patch.object(prod, "build_policy", side_effect=lambda cfg, contract: TinyActor()),
+            ):
+                prod.train(resumed_cfg, stop_after=3)
+                partial = torch.load(
+                    root / "epoch-resume/checkpoints/latest.pt", weights_only=True,
+                )
+                self.assertEqual(partial["step"], 3)
+                self.assertEqual(partial["effective_total_steps"], 8)
+                self.assertIsNone(partial["resume_signature"]["training"]["steps"])
+                self.assertEqual(partial["resume_signature"]["training"]["epochs"], 1)
+                resumed_cfg.training.resume = True
+                prod.train(resumed_cfg)
+                prod.train(baseline_cfg)
+
+            one = torch.load(
+                root / "epoch-resume/checkpoints/latest.pt", weights_only=True,
+            )
+            two = torch.load(
+                root / "epoch-baseline/checkpoints/latest.pt", weights_only=True,
+            )
+            self.assertEqual(one["step"], 8)
+            self.assertEqual(two["step"], 8)
+            self.assertEqual(one["effective_total_steps"], 8)
+            for key in one["model"]:
+                self.assertTrue(torch.equal(one["model"][key], two["model"][key]), key)
+            best = torch.load(
+                root / "epoch-resume/checkpoints/best.pt", weights_only=True,
+            )
+            self.assertEqual(best["step"], 8)
+            metrics = [
+                __import__("json").loads(line)
+                for line in (root / "epoch-resume/metrics.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [(item["phase"], item["step"]) for item in metrics
+                 if item["phase"] == "val"], [("val", 8)],
+            )
+            self.assertEqual(
+                [item["epoch_equivalent"] for item in metrics
+                 if item["phase"] == "train"][-1], 1.0,
+            )
+
     def test_split_by_episode_never_by_frame(self):
         first = prod.split_episode_ids(10, .2, 42)
         self.assertEqual(first, prod.split_episode_ids(10, .2, 42))
