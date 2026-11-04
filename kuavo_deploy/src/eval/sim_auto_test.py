@@ -348,7 +348,12 @@ def kuavo_eval_autotest(config: KuavoConfig):
         pretrained_path = Path(cfg.pretrained_path)
     else:
         pretrained_path = Path(f"outputs/train/{cfg.task}/{cfg.method}/{cfg.timestamp}/epoch{cfg.epoch}")
-    output_directory = resolve_eval_output_dir(pretrained_path, Path("outputs/eval"))
+    if policy_type == "rl100_dp_2d":
+        # An exported RL100 bundle is a named directory, not LeRobot's
+        # checkpoints/N/pretrained_model nesting.
+        output_directory = Path("outputs/eval").resolve() / pretrained_path.name
+    else:
+        output_directory = resolve_eval_output_dir(pretrained_path, Path("outputs/eval"))
     output_directory.mkdir(parents=True, exist_ok=True)
 
     # Log evaluation results
