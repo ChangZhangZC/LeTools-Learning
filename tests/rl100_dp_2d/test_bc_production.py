@@ -133,6 +133,16 @@ def config_for_test(output):
 
 
 class ProductionBCUnitTests(unittest.TestCase):
+    def test_canonical_bc_defaults_32_predicted_16_selected(self):
+        cfg = OmegaConf.load(ROOT / "configs/train/rl100_dp_2d.yaml")
+        prod.check_config(cfg)
+        self.assertEqual(int(cfg.data.n_obs_steps), 2)
+        self.assertEqual(int(cfg.data.horizon) - int(cfg.data.n_obs_steps) + 1, 32)
+        self.assertEqual(int(cfg.data.n_action_steps), 16)
+        self.assertEqual(str(cfg.output.dir), "outputs/train/rl100_dp_2d")
+        self.assertFalse(bool(cfg.wandb.enable))
+        self.assertFalse(bool(cfg.tensorboard.enable))
+
     def test_split_by_episode_never_by_frame(self):
         first = prod.split_episode_ids(10, .2, 42)
         self.assertEqual(first, prod.split_episode_ids(10, .2, 42))
