@@ -145,7 +145,9 @@ def _rgb_tensor(value: Any, expected: tuple[int, int, int, int], key: str) -> to
     if tuple(value.shape) != expected:
         raise ValueError(f"{key}: expected {expected}, got {tuple(value.shape)}")
     if value.dtype == torch.uint8:
-        return value.to(torch.float32) / 255.0
+        # Same transport contract as LeTools Diffusion: decode into uint8 and
+        # transfer compact images through DataLoader worker IPC.
+        return value
     if not value.is_floating_point():
         raise TypeError(f"{key}: image must be uint8 or floating point")
     value = value.to(torch.float32)
@@ -222,5 +224,6 @@ def open_lerobot_bc_dataset(
     dataset = LeRobotDataset(
         repo_id=repo_id, root=root, episodes=episodes,
         delta_timestamps=delta_timestamps, video_backend=video_backend,
+        return_uint8=True,
     )
     return RL100LeRobotDataset(dataset, contract, n_obs_steps, horizon)
