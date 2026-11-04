@@ -205,6 +205,9 @@ def open_lerobot_bc_dataset(
     video_backend: str | None = None,
 ) -> RL100LeRobotDataset:
     """Open the native local LeRobot v3 dataset without Zarr or data copies."""
+    pinned_src = Path(__file__).resolve().parents[2] / "third_party" / "lerobot" / "src"
+    if str(pinned_src) not in sys.path:
+        sys.path.insert(0, str(pinned_src))
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
