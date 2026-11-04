@@ -40,6 +40,12 @@ from rl_100.model.common.normalizer import LinearNormalizer  # noqa: E402
 from rl_100.model.diffusion.ema_model import EMAModel  # noqa: E402
 
 
+def resolve_output_dir(path: str | Path) -> Path:
+    """Resolve relative paths against LeTools repository root, like train.py."""
+    selected = Path(path).expanduser()
+    return (selected if selected.is_absolute() else ROOT / selected).resolve()
+
+
 def check_config(cfg) -> None:
     """Reject incompatible horizons, nonfinite budgets, and missing features."""
     horizon, obs = int(cfg.data.horizon), int(cfg.data.n_obs_steps)
@@ -332,7 +338,7 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     device = torch.device(str(cfg.training.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
-    output = Path(str(cfg.output.dir)).expanduser().resolve()
+    output = resolve_output_dir(str(cfg.output.dir))
     paths = {
         "latest": output / "checkpoints" / "latest.pt",
         "best": output / "checkpoints" / "best.pt",
@@ -544,7 +550,7 @@ def main() -> None:
         cfg.output.dir = str(output.parent / (
             f"{output.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         ))
-    print(f"[BC] output_dir: {Path(str(cfg.output.dir)).expanduser().resolve()}")
+    print(f"[BC] output_dir: {resolve_output_dir(str(cfg.output.dir))}")
     train(cfg, stop_after=args.stop_after)
 
 
