@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from kuavo_model.rl100_dp_2d.logging import BCMetricLogger  # noqa: E402
+from kuavo_model.rl100_dp_2d.metrics import BCMetricLogger  # noqa: E402
 
 
 class DummyRun:
