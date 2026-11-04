@@ -13,13 +13,14 @@ import math
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
 for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
@@ -294,26 +295,32 @@ def _sync_ema_buffers(ema: EMAModel, model: torch.nn.Module) -> None:
 
 
 def evaluate(model: torch.nn.Module, loader: DataLoader, obs_steps: int,
-             device: torch.device, seed: int, max_batches: int) -> float:
+             device: torch.device, seed: int, max_batches: int,
+             show_progress: bool = False) -> float:
     """Fixed diffusion-noise seed makes validation loss comparisons meaningful."""
     saved_rng = capture_rng_state()
     previous_mode = model.training
     total = 0.0
     count = 0
+    val_batches = min(len(loader), max_batches) if max_batches else len(loader)
     try:
         _seed_all(seed)
         model.eval()
-        with torch.no_grad():
-            for batch_idx, sample in enumerate(loader):
-                if max_batches and batch_idx >= max_batches:
-                    break
-                assert_valid_action_targets(sample, obs_steps)
-                loss, _ = model.compute_loss(_to_device(sample, device))
-                if loss.ndim != 0 or not torch.isfinite(loss).item():
-                    raise FloatingPointError(f"Invalid validation loss: {loss}")
-                bs = sample["action"].shape[0]
-                total += loss.item() * bs
-                count += bs
+        with tqdm(total=val_batches, desc="Validation", unit="batch",
+                  dynamic_ncols=True, leave=False,
+                  disable=not show_progress or not sys.stderr.isatty()) as progress:
+            with torch.no_grad():
+                for batch_idx, sample in enumerate(loader):
+                    if max_batches and batch_idx >= max_batches:
+                        break
+                    assert_valid_action_targets(sample, obs_steps)
+                    loss, _ = model.compute_loss(_to_device(sample, device))
+                    if loss.ndim != 0 or not torch.isfinite(loss).item():
+                        raise FloatingPointError(f"Invalid validation loss: {loss}")
+                    bs = sample["action"].shape[0]
+                    total += loss.item() * bs
+                    count += bs
+                    progress.update(1)
     finally:
         model.train(previous_mode)
         restore_rng_state(saved_rng)
@@ -364,6 +371,7 @@ def _make_best_payload(cfg, view, selected_model, step: int, split: dict,
 
 def train(cfg, *, stop_after: int | None = None) -> Path:
     check_config(cfg)
+    setup_start = time.monotonic()
     device = torch.device(str(cfg.training.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -484,8 +492,8 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         pin_memory=device.type == "cuda",
         generator=torch.Generator().manual_seed(int(cfg.validation.seed)),
     )
-    print(f"[BC] episodes={episodes} train={train_ids} val={val_ids}; "
-          f"anchors={len(train_anchors)}/{len(val_anchors)}")
+    print(f"[BC] episodes={episodes} train/val={len(train_ids)}/{len(val_ids)} "
+          f"windows={len(train_anchors)}/{len(val_anchors)}")
     cap_steps, cap_epochs = training_limits(cfg)
     print(f"[BC] budget: steps={cap_steps}, epochs={cap_epochs}, "
           f"steps_per_epoch={steps_per_epoch}, effective_total_steps={total_steps}")
