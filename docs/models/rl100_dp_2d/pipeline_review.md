@@ -2,20 +2,22 @@
 
 Scope: LeTools `feature/rl100-bc-progress-eta`; upstream RL-100 pinned at
 `6b6afceb7eb12525398207b5d6e66908863dc385`, LeRobot at
-`a07f22e22ce88cddff1f6eddced9ea008fbfc37c`. Review only:
-no data, optimizer, model or checkpoint behavior changed here.
+`a07f22e22ce88cddff1f6eddced9ea008fbfc37c`. The branch now
+adopts LeRobot's compact uint8 video transport and MetricsTracker console style.
+No native RL100 model/loss, optimizer, scheduler, EMA, sampler, validation
+schedule or checkpoint format was changed.
 
 ## Comparison
 
 | Stage | Original RL-100 | LeRobot ACT/Diffusion | Current native RL100 BC |
 | --- | --- | --- | --- |
 | Data | Zarr ReplayBuffer + SequenceSampler | LeRobot v3 MP4/Parquet | LeRobot v3 delta_timestamps + valid action windows |
-| Video | Zarr arrays; no PyAV random seek | video_backend with uint8 transport | PyAV; Dataset converts images to float32 |
-| Batch prep | Dataset mapping, device transfer | PolicyProcessorPipeline | Custom LeRobot-to-RL100 mapping + device transfer |
+| Video | Zarr arrays; no PyAV random seek | video_backend with uint8 transport | PyAV, LeRobotDataset(return_uint8=True) |
+| Batch prep | Dataset mapping, device transfer | PolicyProcessorPipeline | Native mapping, uint8 over DataLoader IPC, float32 / 255 at _to_device boundary |
 | Normalization | Actor-owned LinearNormalizer | NormalizerProcessorStep using dataset stats | **Actor-owned LinearNormalizer** |
 | Model / loss | RL1002D.compute_loss(batch) | PreTrainedPolicy.forward(batch) | **RL1002D.compute_loss(batch)** |
 | Update | Native RL100 optimizer/scheduler/EMA | Accelerate update_policy | Native RL100 optimizer/scheduler/EMA |
-| Logging | epoch tqdm, WandB | MetricsTracker, tqdm | JSONL, tqdm, optional WandB/TB |
+| Logging | epoch tqdm, WandB | MetricsTracker, tqdm | LeRobot AverageMeter/MetricsTracker + tqdm; JSONL, optional WandB/TB |
 | Validation | Examined train_ddp.py BC path has RUN_VALIDATION=False | Configured evaluation | Held-out, every val_every optimizer steps |
 
 Native RL1002D.compute_loss normalizes observation/action internally, slices
@@ -30,28 +32,49 @@ Accelerator, whereas this actor uses compute_loss(batch) and RL100-specific
 training/checkpoint semantics. Do not substitute the entire LeRobot
 trainer or make the native actor look like a LeRobot PreTrainedPolicy.
 
-## Recommended staged changes (proposals, not yet implemented)
+## Implemented adaptation on this branch
 
-1. **Data transport:** A/B-test LeRobotDataset(return_uint8=True), retaining
-   uint8 across DataLoader worker IPC. At the custom RL100 adapter boundary,
-   cast to float32 / 255 to preserve [0,1] input. LeRobot's own trainer
-   performs its uint8 -> float32 conversion in the trainer process before
-   the PolicyProcessorPipeline; conversion on the GPU would be an additional
-   new optimization. Test torch.equal/allclose against the current batches,
-   CHW/camera order, deterministic sampling, and CPU memory and throughput.
-2. **Explicit light preprocessor:** Isolate key mapping, RGB casting,
-   device transfer and batch validation. Do not normalize state/action
-   outside the RL100 actor; do not move image resize/Imagenet transform out
-   of the RL100 observation encoder.
-3. **Metrics:** Retain existing BCMetricLogger, and augment interval averages
-   and timing if needed; borrowing LeRobot's logging concepts does not
-   require replacing its optimizer/step engine.
-4. **Validation economics:** At 14,323 held-out windows and validation batch
-   size 8, full validation has 1,791 batches. With 357,700 train steps and
-   val_every=1000, 358 validation passes require 641,178 validation
-   batches. Benchmark this overhead; a validation-frequency change or a
-   max_batches cap changes best.pt selection, so treat it as a separate
-   explicit experimental/configuration decision.
+1. `open_lerobot_bc_dataset()` now requests
+   `LeRobotDataset(return_uint8=True)` while preserving the configured
+   PyAV backend, temporal alignment, train/val valid-window indices and
+   camera metadata mapping.
+2. `RL100LeRobotDataset.__getitem__()` keeps decoded uint8 RGB until
+   DataLoader collation and worker-to-process transfer. State/action
+   remain float32. `bc_utils._to_device()` converts each `rgb_*` tensor
+   to float32 [0,1] at the model boundary; no new state/action
+   normalization or RGB transforms are added.
+3. `train.py` uses LeRobot's `AverageMeter` and `MetricsTracker` for
+   console summaries alongside tqdm. Partial training batches are
+   accounted for in samples/epoch display; the JSONL and optional
+   WandB/TensorBoard logger remain intact.
+4. `test_bc_checkpoint_reload.py` routes single-sample RGB through
+   the same `_to_device()` conversion before calling native inference.
+
+These are **data/telemetry** changes only. The native
+`RL1002D.compute_loss(batch)`, actor-owned LinearNormalizer,
+MultiImageObsEncoder resize/ImageNet normalization, original AdamW,
+RL100 scheduler/EMA, checkpoint content, evaluation loop and
+frequency are unchanged.
+
+LeRobot's own train script converts uint8 -> float32 in its trainer
+before the PolicyProcessorPipeline. Our adapter converts on the
+target device during `_to_device()`. This is a deliberately narrow
+optimization rather than a replacement with LeRobot's entire
+Diffusion Policy preprocessor. PyAV random decoding itself is
+unchanged; reduced data transport does **not** guarantee faster
+decode or first-batch time.
+
+## Deferred decisions (not in this change)
+
+- Do not replace the RL100 native `compute_loss()` with LeRobot's
+  `policy.forward()` or `update_policy()` / Accelerate.
+- Do not use ACT/Diffusion `NormalizerProcessorStep`; it would
+  duplicate or change actor-owned state/action normalization.
+- Do not change PyAV to TorchCodec without a benchmark and compatibility check.
+- Do not change validation cadence/held-out dataset/selection of best.pt.
+  For 14,323 validation windows and validation batch size 8, a full
+  validation is 1,791 batches; measuring its cost is a separate task.
+- Native checkpoint / export and deployment remain unaffected.
 
 ## Acceptance tests
 
