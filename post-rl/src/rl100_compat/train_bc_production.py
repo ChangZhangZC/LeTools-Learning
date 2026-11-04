@@ -14,6 +14,7 @@ import math
 import random
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,7 @@ for directory in (ROOT / "third_party" / "lerobot" / "src",
         sys.path.insert(0, str(directory))
 
 from rl100_compat.lerobot_data import open_lerobot_bc_dataset  # noqa: E402
+from rl100_compat.bc_logging import BCMetricLogger  # noqa: E402
 from rl100_compat.train_bc import (  # noqa: E402
     _payload, _save_checkpoint, _to_device, assert_valid_action_targets,
     build_policy, make_episode_sampler,
@@ -446,65 +448,73 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     print(f"[BC] state={view.contract.state_dim} action={view.contract.action_dim} "
           f"cameras={list(view.contract.source_to_rgb)}; "
           f"resume_step={start_step}, target={last_step}/{total_steps}")
-    model.train()
-    start_time = time.monotonic()
-    for step, sample in enumerate(train_loader, start=start_step + 1):
-        assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
-        batch = _to_device(sample, device)
-        optimizer.zero_grad(set_to_none=True)
-        loss, details = model.compute_loss(batch)
-        if loss.ndim != 0 or not torch.isfinite(loss).item():
-            raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
-        loss.backward()
-        grad_limit = float(cfg.training.max_grad_norm)
-        if grad_limit:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
-        optimizer.step()
-        scheduler.step()
-        if ema is not None:
-            ema.step(model)
-            _sync_ema_buffers(ema, model)
+    metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
+    try:
+        model.train()
+        start_time = time.monotonic()
+        for step, sample in enumerate(train_loader, start=start_step + 1):
+            assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
+            batch = _to_device(sample, device)
+            optimizer.zero_grad(set_to_none=True)
+            loss, details = model.compute_loss(batch)
+            if loss.ndim != 0 or not torch.isfinite(loss).item():
+                raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
+            loss.backward()
+            grad_limit = float(cfg.training.max_grad_norm)
+            if grad_limit:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
+            optimizer.step()
+            scheduler.step()
+            if ema is not None:
+                ema.step(model)
+                _sync_ema_buffers(ema, model)
 
-        if step % int(cfg.training.log_every) == 0 or step == last_step:
-            lr = optimizer.param_groups[0]["lr"]
-            epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
-            _write_metric(paths["metrics"], phase="train", step=step,
-                          epoch_equivalent=round(epoch_progress, 6),
-                          loss=float(loss.item()), lr=float(lr),
-                          elapsed_s=round(time.monotonic() - start_time, 3))
-            print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
+            if step % int(cfg.training.log_every) == 0 or step == last_step:
+                lr = optimizer.param_groups[0]["lr"]
+                epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
+                _write_metric(paths["metrics"], phase="train", step=step,
+                              epoch_equivalent=round(epoch_progress, 6),
+                              loss=float(loss.item()), lr=float(lr),
+                              elapsed_s=round(time.monotonic() - start_time, 3))
+                metric_logger.train(step=step, loss=float(loss.item()),
+                                    lr=float(lr), epoch=float(epoch_progress))
+                print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
 
-        if step % int(cfg.training.val_every) == 0 or step == total_steps:
-            selected = ema.averaged_model if ema is not None else model
-            val_loss = evaluate(
-                selected, val_loader, int(cfg.data.n_obs_steps),
-                device, int(cfg.validation.seed),
-                int(cfg.validation.max_batches),
-            )
-            _write_metric(paths["metrics"], phase="val", step=step,
-                          loss=float(val_loss),
-                          weights="ema" if ema is not None else "raw")
-            print(f"[VAL] step={step} loss={val_loss:.6f}")
-            if best_loss is None or val_loss < best_loss:
-                best_loss, best_step = float(val_loss), step
-                _save_checkpoint(paths["best"], _make_best_payload(
-                    cfg, view, selected, step, split, best_loss,
-                    "ema" if ema is not None else "raw",
-                ))
-                print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+            if step % int(cfg.training.val_every) == 0 or step == total_steps:
+                selected = ema.averaged_model if ema is not None else model
+                val_loss = evaluate(
+                    selected, val_loader, int(cfg.data.n_obs_steps),
+                    device, int(cfg.validation.seed),
+                    int(cfg.validation.max_batches),
+                )
+                _write_metric(paths["metrics"], phase="val", step=step,
+                              loss=float(val_loss),
+                              weights="ema" if ema is not None else "raw")
+                print(f"[VAL] step={step} loss={val_loss:.6f}")
+                if best_loss is None or val_loss < best_loss:
+                    best_loss, best_step = float(val_loss), step
+                    _save_checkpoint(paths["best"], _make_best_payload(
+                        cfg, view, selected, step, split, best_loss,
+                        "ema" if ema is not None else "raw",
+                    ))
+                    print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+                metric_logger.validation(step=step, loss=float(val_loss),
+                                         best_loss=float(best_loss))
 
-        if step % int(cfg.training.save_every) == 0 or step == last_step:
-            latest = _make_resume_payload(
-                cfg, view, model, optimizer, scheduler, ema,
-                step, split, best_loss, best_step,
-            )
-            _save_checkpoint(paths["latest"], latest)
-            if bool(cfg.training.keep_step_checkpoints):
-                snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
-                _save_checkpoint(snapshot, latest)
-            print(f"[PASS] training checkpoint: step={step}")
-    if start_step >= last_step:
-        print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
+            if step % int(cfg.training.save_every) == 0 or step == last_step:
+                latest = _make_resume_payload(
+                    cfg, view, model, optimizer, scheduler, ema,
+                    step, split, best_loss, best_step,
+                )
+                _save_checkpoint(paths["latest"], latest)
+                if bool(cfg.training.keep_step_checkpoints):
+                    snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
+                    _save_checkpoint(snapshot, latest)
+                print(f"[PASS] training checkpoint: step={step}")
+        if start_step >= last_step:
+            print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
+    finally:
+        metric_logger.close()
     return paths["latest"]
 
 
@@ -513,6 +523,8 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("post-rl/config/bc_train.yaml"))
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true", help="Resume same run from latest.pt")
+    parser.add_argument("--no-timestamp", action="store_true",
+                        help="Use output.dir as-is, like LeTools train.py --no-timestamp")
     parser.add_argument("--stop-after", type=int, default=None,
                         help="Test interruption at this step; scheduler total remains unchanged")
     args = parser.parse_args()
@@ -521,6 +533,12 @@ def main() -> None:
         cfg.output.dir = str(args.output_dir)
     if args.resume:
         cfg.training.resume = True
+    if not bool(cfg.training.resume) and not args.no_timestamp:
+        output = Path(str(cfg.output.dir))
+        cfg.output.dir = str(output.parent / (
+            f"{output.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        ))
+    print(f"[BC] output_dir: {Path(str(cfg.output.dir)).expanduser().resolve()}")
     train(cfg, stop_after=args.stop_after)
 
 
