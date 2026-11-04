@@ -7,6 +7,7 @@ the exact keys/shapes expected by RL1002D.compute_loss().
 from __future__ import annotations
 
 import re
+import sys
 from collections import UserDict
 from collections.abc import Mapping
 from dataclasses import dataclass
