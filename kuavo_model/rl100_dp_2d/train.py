@@ -28,7 +28,7 @@ for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
         sys.path.insert(0, str(directory))
 
 from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
-from kuavo_model.rl100_dp_2d.logging import BCMetricLogger  # noqa: E402
+from kuavo_model.rl100_dp_2d.metrics import BCMetricLogger  # noqa: E402
 from kuavo_model.rl100_dp_2d.bc_utils import (  # noqa: E402
     _payload, _save_checkpoint, _to_device, assert_valid_action_targets,
     make_episode_sampler,
