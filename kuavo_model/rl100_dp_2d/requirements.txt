@@ -1,0 +1,23 @@
+# Additional packages for the *native* RL-100 DP-2D baseline only.
+# Keep LeTools' original requirements and pinned LeRobot untouched.
+# Run from the LeTools-Learning repository root after submodule initialization:
+#   MAX_JOBS=2 python -m pip install --no-build-isolation -r kuavo_model/rl100_dp_2d/requirements.txt
+#
+# This is a preliminary, isolated bootstrap manifest, not a validated lockfile.
+# Check actual Python / torch / CUDA / compiler versions before installing.
+#
+# RL1002D imports pytorch3d.ops unconditionally even with w_pc=False.
+# Use the original RL-100 bundled C++/CUDA extension, NOT a dummy stub.
+-e ./third_party/rl100/third_party/pytorch3d_simplified
+#
+# Legacy RL-100 IQL/Critic import chain needs gym (not only gymnasium).
+# This pins an import-compatible version, NOT original Gym rollout semantics.
+gym==0.26.2
+#
+# RL-100 LinearNormalizer imports Zarr 2 APIs.
+# Older Zarr 2 uses cbuffer_sizes, absent in newer numcodecs releases.
+zarr==2.18.7
+numcodecs==0.15.1
+#
+# RL1002D module imports matplotlib for optional image debugging.
+matplotlib>=3.8,<4
