@@ -4,9 +4,19 @@ These preserve the original tested LeTools integration behavior.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import torch
 from omegaconf import OmegaConf
-from rl_100.model.common.normalizer import LinearNormalizer
+
+ROOT = Path(__file__).resolve().parents[2]
+for source in (ROOT / "third_party" / "rl100" / "RL-100",
+               ROOT / "third_party" / "lerobot" / "src"):
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
+
+from rl_100.model.common.normalizer import LinearNormalizer  # noqa: E402
 
 
 def make_episode_sampler(view, n_obs_steps: int, horizon: int):
