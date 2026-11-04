@@ -57,6 +57,11 @@ class BCMetricLogger:
                     self._wb_id_path.write_text(
                         str(self._wb_run.id) + "\n", encoding="utf-8"
                     )
+                # Use the trainer's optimizer-step axis instead of WandB's
+                # internal event counter: train/val may log at the same step.
+                self._wb_run.define_metric("trainer_step")
+                self._wb_run.define_metric("train/*", step_metric="trainer_step")
+                self._wb_run.define_metric("val/*", step_metric="trainer_step")
             if bool(tb.get("enable", False)):
                 try:
                     from torch.utils.tensorboard import SummaryWriter
@@ -72,7 +77,7 @@ class BCMetricLogger:
 
     def _log(self, step: int, values: dict[str, float]) -> None:
         if self._wb_run is not None:
-            self._wb_run.log(values, step=step)
+            self._wb_run.log({"trainer_step": step, **values})
         if self._tb is not None:
             for key, val in values.items():
                 self._tb.add_scalar(key, val, global_step=step)
