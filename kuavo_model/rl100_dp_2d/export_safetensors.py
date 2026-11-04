@@ -56,7 +56,7 @@ def export_checkpoint(source: str | Path, output_dir: str | Path, *,
     for name, value in actor.items():
         if not isinstance(name, str) or not isinstance(value, torch.Tensor):
             raise TypeError(f"Actor state_dict must be named tensors; invalid {name!r}")
-        tensors[name] = value.detach().cpu().contiguous()
+        tensors[name] = value.detach().cpu().contiguous().clone()
     # Native RL100 normalizers are part of actor.state_dict; dropping them
     # would make exported actions incorrectly scaled.
     for key in ("agent_pos", "action"):
@@ -70,8 +70,8 @@ def export_checkpoint(source: str | Path, output_dir: str | Path, *,
         raise ValueError("Invalid RL100 observation/action shape metadata")
     expected_state = int(obs["agent_pos"]["shape"][0])
     expected_action = int(action["shape"][0])
-    if (len(reference["state_names"]) != expected_state
-            or len(reference["action_names"]) != expected_action):
+    if ((reference["state_names"] and len(reference["state_names"]) != expected_state)
+            or (reference["action_names"] and len(reference["action_names"]) != expected_action)):
         raise ValueError("Actor state/action names do not match metadata dimensions")
 
     manifest = {
