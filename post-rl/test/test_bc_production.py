@@ -284,6 +284,12 @@ class ProductionBCUnitTests(unittest.TestCase):
             for key in one["ema_model"]:
                 self.assertTrue(torch.equal(one["ema_model"][key], two["ema_model"][key]), key)
 
+    def test_relative_output_paths_resolve_at_repo_root(self):
+        self.assertEqual(
+            prod.resolve_output_dir("outputs/train/rl100_2d"),
+            (ROOT / "outputs/train/rl100_2d").resolve(),
+        )
+
     def test_cli_timestamp_matches_lerobot_and_resume_preserves_path(self):
         import re
         with tempfile.TemporaryDirectory() as temp:
