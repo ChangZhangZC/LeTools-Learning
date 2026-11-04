@@ -38,6 +38,35 @@ no_pre_action=True implies 32 modeled actions, n_action_steps=16,
 224 resize with no random crop. This is a configuration, not proof
 of full-run convergence.
 
+## Stop by Steps and/or Epochs
+
+The baseline trainer supports two optional limits in
+`configs/train/rl100_dp_2d.yaml`:
+
+    training:
+      steps: 100000  # Set null to disable optimizer-step cap.
+      epochs: null   # Set a positive integer to enable full-data-pass cap.
+
+- Steps only: epochs=null, training ends after the specified optimizer updates.
+- Epochs only: steps=null, training ends after the specified number of complete
+  passes through the **training subset's valid action windows**, NOT raw
+  frames or held-out validation episodes.
+- Both enabled: stops at whichever cap comes first. Both null is invalid.
+- Epoch size is ceil(valid_train_windows / batch_size). The final partial
+  batch of each epoch counts as an update and is not discarded.
+- The chosen effective training step total is used for the original
+  cosine/warmup scheduler, final validation, and final checkpoint. The
+  equivalent epoch count is recorded in normal training metrics.
+- Resume must keep both caps, data split and Batch Size unchanged: the
+  scheduler budget cannot be redefined partway through an existing run.
+  Previously saved steps-only checkpoints remain compatible when the
+  epochs cap is unset.
+
+Example: 1,001 training windows / batch_size=8 means 126 optimizer
+steps per epoch. steps=500 and epochs=3 stops at min(500, 378)=378.
+With a very small cap (e.g. 1 epoch), consider reducing the configured
+lr_warmup_steps: otherwise the run may end entirely in warmup.
+
 New CLI runs use the same timestamp convention as LeTools ACT/DP:
 
     outputs/train/rl100_dp_2d_YYYYMMDD_HHMMSS/
