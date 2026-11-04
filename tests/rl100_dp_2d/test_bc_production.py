@@ -318,7 +318,7 @@ class ProductionBCUnitTests(unittest.TestCase):
                 prod.main()
             first = runner.call_args.args[0]
             self.assertRegex(
-                str(first.output.dir), r"rl100_2d_\d{8}_\d{6}$",
+                str(first.output.dir), r"rl100_dp_2d_\d{8}_\d{6}$",
             )
 
             exact = Path(temp) / "outputs/train/rl100_dp_2d_20261104_090000"
