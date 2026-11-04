@@ -28,6 +28,7 @@ for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
+from lerobot.utils.logging_utils import AverageMeter, MetricsTracker  # noqa: E402
 from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
 from kuavo_model.rl100_dp_2d.metrics import BCMetricLogger  # noqa: E402
 from kuavo_model.rl100_dp_2d.bc_utils import (  # noqa: E402
@@ -509,20 +510,34 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         restore_rng_state(logger_rng)
     print(f"[BC] setup={timedelta(seconds=int(time.monotonic() - setup_start))}; "
           "starting DataLoader (first video batch may be slower)")
+    # LeTools Diffusion's AverageMeter/MetricsTracker display is reused here;
+    # RL100 update_policy/optimizer/EMA and checkpoint logic remain native.
+    display_metrics = {
+        "loss": AverageMeter("loss", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+    }
+    if float(cfg.training.max_grad_norm) > 0:
+        display_metrics["grad_norm"] = AverageMeter("grdn", ":.3f")
+    train_tracker = MetricsTracker(
+        int(cfg.training.batch_size), len(train_anchors), len(train_ids),
+        display_metrics, initial_step=start_step,
+    )
     try:
         model.train()
         start_time = time.monotonic()
         previous_step_end = start_time
         data_sum = update_sum = 0.0
         interval_steps = 0
-        total_epochs = total_steps / steps_per_epoch
         with tqdm(total=last_step - start_step, desc="RL100 BC", unit="step",
                   dynamic_ncols=True, disable=not sys.stderr.isatty()) as progress:
             for step, sample in enumerate(train_loader, start=start_step + 1):
-                batch_ready = time.monotonic()
-                data_sum += batch_ready - previous_step_end
                 assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
                 batch = _to_device(sample, device)
+                update_start = time.monotonic()
+                data_s_step = update_start - previous_step_end
+                data_sum += data_s_step
                 optimizer.zero_grad(set_to_none=True)
                 loss, details = model.compute_loss(batch)
                 if loss.ndim != 0 or not torch.isfinite(loss).item():
@@ -530,14 +545,33 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
                 loss.backward()
                 grad_limit = float(cfg.training.max_grad_norm)
                 if grad_limit:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), grad_limit, error_if_nonfinite=True
+                    )
                 optimizer.step()
                 scheduler.step()
                 if ema is not None:
                     ema.step(model)
                     _sync_ema_buffers(ema, model)
-                update_sum += time.monotonic() - batch_ready
+                update_s_step = time.monotonic() - update_start
+                update_sum += update_s_step
                 interval_steps += 1
+                train_tracker.step()
+                # MetricsTracker assumes fixed-size batches; adjust counters for
+                # our sampler's last partial batch in each exact training epoch.
+                done_epochs, partial_steps = divmod(step, steps_per_epoch)
+                seen = done_epochs * len(train_anchors) + min(
+                    partial_steps * int(cfg.training.batch_size), len(train_anchors)
+                )
+                train_tracker.samples = seen
+                train_tracker.epochs = seen / len(train_anchors)
+                train_tracker.episodes = seen * len(train_ids) / len(train_anchors)
+                train_tracker.loss = float(loss.item())
+                train_tracker.lr = optimizer.param_groups[0]["lr"]
+                train_tracker.dataloading_s = data_s_step
+                train_tracker.update_s = update_s_step
+                if grad_limit:
+                    train_tracker.grad_norm = float(grad_norm.item())
                 progress.update(1)
 
                 if step % int(cfg.training.log_every) == 0 or step == last_step:
@@ -558,19 +592,18 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
                                   eta_s=round(eta_s, 1))
                     metric_logger.train(step=step, loss=float(loss.item()),
                                         lr=float(lr), epoch=float(epoch_progress))
-                    progress.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.1e}",
-                                         epoch=f"{epoch_progress:.2f}", data_s=f"{data_s:.2f}",
-                                         updt_s=f"{update_s:.2f}", refresh=False)
+                    progress.set_postfix(loss=f"{train_tracker.loss.avg:.3f}",
+                                         lr=f"{lr:.1e}", epch=f"{train_tracker.epochs:.2f}",
+                                         data_s=f"{data_s:.2f}", updt_s=f"{update_s:.2f}",
+                                         refresh=False)
                     tqdm.write(
-                        f"[BC] {datetime.now():%H:%M:%S} "
-                        f"epoch={epoch_progress:.2f}/{total_epochs:.2f} "
-                        f"step={step}/{total_steps} ({step / total_steps:.1%}) "
-                        f"loss={loss.item():.6f} lr={lr:.2e} "
-                        f"data_s={data_s:.3f} updt_s={update_s:.3f} "
-                        f"speed={speed:.2f}step/s "
-                        f"elapsed={timedelta(seconds=int(elapsed))} "
+                        f"[TRAIN] {datetime.now():%H:%M:%S} {train_tracker} "
+                        f"({step}/{total_steps}, {step / total_steps:.1%}) "
+                        f"speed:{speed:.2f}step/s "
+                        f"elapsed:{timedelta(seconds=int(elapsed))} "
                         f"ETA~{timedelta(seconds=int(eta_s))}"
                     )
+                    train_tracker.reset_averages()
                     data_sum = update_sum = 0.0
                     interval_steps = 0
 
