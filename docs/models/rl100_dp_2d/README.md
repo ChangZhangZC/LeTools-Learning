@@ -130,3 +130,92 @@ The previous 10-Episode GPU smoke succeeded on the old paths. These
 new paths and the refactored imports require regression checks on
 pro6000 before merging the feature branch into arbim/dev.
 For original integration decisions, see archive/ in this directory.
+
+## Native RL100 DP-2D Simulation Eval (no Model Server)
+
+Training and future RL post-training keep the **original torch.save .pt
+checkpoint schema** (latest.pt, best.pt). Do not rename .pt to .safetensors
+or replace native actor/optimizer/EMA checkpoint logic.
+
+A separate inference-only export produces:
+
+    outputs/export/rl100_dp_2d_my_run/
+      model.safetensors         # actor state_dict including trained normalizers
+      rl100_manifest.json       # native RL100 model spec, camera map, joint names
+
+This is **not** an ordinary LeRobot pretrained checkpoint. Its manifest is
+intentionally not called config.json because the native RL1002D actor is
+not a registered LeRobot PreTrainedPolicy. Native Eval uses a small direct
+loader, the original RL1002D factory, and LeTools' existing sim_auto_test.
+
+1. Export an actor from a native BC best.pt:
+
+       python -m kuavo_model.rl100_dp_2d.export_safetensors \
+         --checkpoint outputs/train/rl100_dp_2d_RUN/checkpoints/best.pt \
+         --output-dir outputs/export/rl100_dp_2d_RUN
+
+   To export EMA weights from latest.pt, set --actor-key ema_model.
+   For a future RL post-training checkpoint whose actor state_dict is
+   under 'model' but lacks BC-style metadata, use --metadata-from pointing
+   to a compatible BC best.pt. The original training checkpoint is
+   never modified, and critic/dynamics/optimizer parameters are not exported.
+   A post-RL actor whose architecture or normalizer contract differs
+   requires an explicit new compatible loader rather than silent conversion.
+
+2. Copy and edit configs/deploy/rl100_dp_2d_eval.yaml:
+
+       env:
+         inference_env: sim
+         platform_type: "4pro"
+         eef_type: rq2f85
+         which_arm: both
+         image_size: [640, 480]
+
+       inference:
+         policy_type: rl100_dp_2d
+         pretrained_path: outputs/export/rl100_dp_2d_RUN
+         device: cuda
+         n_action_steps: 16
+         rl100_resize_images: false
+         eval_episodes: 1
+         async_inference: false
+
+   Match platform, end-effector type, dimensions, control units, joint
+   order, camera names and RGB dimensions to the source BC dataset.
+   Explicit resizing is offered only for RGB shape; it cannot repair
+   inconsistent image preprocessing or robot action conventions.
+
+3. Start the regular simulator/ROS services; then run the existing Eval:
+
+       python kuavo_deploy/src/scripts/script_auto_test.py \
+         --task auto_test --config configs/deploy/rl100_dp_2d_eval.yaml
+
+   This runs the original per-step environment, logs and success checking.
+   No server process, ZMQ transport or PolicyClient is involved.
+
+### Runtime n_action_steps
+
+This Eval YAML value means **how many of the current sampled action chunk
+to execute before replanning**. It is distinct from the BC training setting
+data.n_action_steps=16. Allowed Eval values are 1..16 for the present model.
+If omitted, the native wrapper defaults conservatively to 1.
+Every call to select_action(obs) updates the last two consecutive observed
+frames, even when executing a cached action. This makes multi-step execution
+compatible with n_obs_steps=2 in the local synchronous Eval loop; unlike
+the server/client pipeline, observations are not dropped during caching.
+A 16-step choice reduces Diffusion inference frequency but makes the
+motion more open-loop and may react more slowly to disturbances.
+
+The old ModelServerAdapter is unchanged and retains its own
+execution_horizon restriction for the separate Client deployment path.
+
+### Tests
+
+    python -m unittest discover \
+      -s tests/rl100_dp_2d -p 'test_*.py' -v
+
+Unit tests cover Safetensors roundtrip, checkpoint preservation,
+Post-RL metadata fallback, strict input dimensions and consecutive
+observation history with multi-step local action caching.
+A real checkpoint forward pass and a simulator episode remain mandatory
+validation before claiming this Eval is fully connected.

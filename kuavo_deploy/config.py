@@ -285,6 +285,9 @@ class ConfigInference:
     go_bag_path: str = ""
     policy_type: str = "diffusion"  # 支持 diffusion, act 等
     pretrained_path: str = ""
+    # Only for RL100 DP-2D native Eval: executed steps per generated chunk.
+    n_action_steps: int | None = None
+    rl100_resize_images: bool = False
     eval_episodes: int = 1
     seed: int = 42
     start_seed: int = 42
@@ -339,6 +342,7 @@ class ConfigInference:
             "client",
             "act",
             "diffusion",
+            "rl100_dp_2d",
             "pi0",
             "pi0_fast",
             "pi05",
@@ -352,6 +356,13 @@ class ConfigInference:
             raise ValueError(f"Unsupported policy_type '{self.policy_type}'")
         if self.device not in ["cuda", "cpu"]:
             raise ValueError("device must be 'cuda' or 'cpu'")
+        if self.n_action_steps is not None and (
+                isinstance(self.n_action_steps, bool)
+                or not isinstance(self.n_action_steps, int)
+                or self.n_action_steps < 1):
+            raise ValueError("inference.n_action_steps must be a positive integer or null")
+        if self.policy_type != "rl100_dp_2d" and self.n_action_steps is not None:
+            raise ValueError("inference.n_action_steps is currently supported only for rl100_dp_2d")
 
         # RTC-Lite validation. Keep the hard rules narrow; the plan flags the
         # freeze/overlap/keep_min relation as a *recommendation*, not a failure.

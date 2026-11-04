@@ -21,3 +21,6 @@ numcodecs==0.15.1
 #
 # RL1002D module imports matplotlib for optional image debugging.
 matplotlib>=3.8,<4
+
+# Export-only RL100 model.safetensors bundles for native in-process Eval.
+safetensors>=0.4,<1

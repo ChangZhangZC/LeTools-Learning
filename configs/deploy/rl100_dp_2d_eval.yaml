@@ -1,0 +1,21 @@
+# Native in-process RL100 DP-2D simulation evaluation (no Model Server).
+# This profile inherits configs/deploy/total/deploy_total.yaml.
+# Match platform/eef_type/which_arm/image_size to the dataset used for BC.
+env:
+  inference_env: sim
+  platform_type: "4pro"
+  eef_type: rq2f85
+  which_arm: both
+  image_size: [640, 480]
+  camera_encoding: jpeg
+
+inference:
+  policy_type: rl100_dp_2d
+  # Directory containing model.safetensors + rl100_manifest.json (not a .pt).
+  pretrained_path: "outputs/export/rl100_dp_2d_example"
+  device: cuda
+  eval_episodes: 1
+  max_episode_steps: 100
+  async_inference: false
+  n_action_steps: 16   # Execute this many actions before replanning, 1..trained 16.
+  rl100_resize_images: false  # Prefer matching original training RGB dimensions.
