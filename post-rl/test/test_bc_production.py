@@ -243,5 +243,49 @@ class ProductionBCUnitTests(unittest.TestCase):
             self.assertFalse(set(best["split"]["train"]) & set(best["split"]["val"]))
 
 
+    def test_cli_timestamp_matches_lerobot_and_resume_preserves_path(self):
+        import re
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "bc_train.yaml"
+            cfg = config_for_test(Path(temp) / "unused")
+            cfg.output.dir = str(Path(temp) / "outputs/train/rl100_2d")
+            OmegaConf.save(cfg, config_path)
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train_bc_production.py", "--config", str(config_path),
+                ]),
+            ):
+                prod.main()
+            first = runner.call_args.args[0]
+            self.assertRegex(
+                str(first.output.dir), r"rl100_2d_\d{8}_\d{6}$",
+            )
+
+            exact = Path(temp) / "outputs/train/rl100_2d_20261104_090000"
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train_bc_production.py", "--config", str(config_path),
+                    "--resume", "--output-dir", str(exact),
+                ]),
+            ):
+                prod.main()
+            self.assertEqual(str(runner.call_args.args[0].output.dir), str(exact))
+            self.assertTrue(runner.call_args.args[0].training.resume)
+
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train_bc_production.py", "--config", str(config_path),
+                    "--no-timestamp",
+                ]),
+            ):
+                prod.main()
+            self.assertEqual(
+                str(runner.call_args.args[0].output.dir), str(cfg.output.dir),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
