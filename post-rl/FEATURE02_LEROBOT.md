@@ -1,3 +1,5 @@
+> **Archived Feature 02 notes.** Standalone `smoke_*.py` scripts referenced below were removed after acceptance. Current training/testing commands are in `post-rl/README.md`; maintained tests are `post-rl/test/test_*.py`. Historical descriptions are retained for traceability.
+
 # Feature 02 — LeRobot v3 to native RL1002D
 
 The dimension contract is owned by **LeTools CvtRosbag2Lerobot**, not by DP.
