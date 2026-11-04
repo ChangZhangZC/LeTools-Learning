@@ -141,7 +141,8 @@ def check_control_signals():
 
 
     
-def setup_policy(pretrained_path, policy_type, device=torch.device("cuda"), task_prompt="robot manipulation"):
+def setup_policy(pretrained_path, policy_type, device=torch.device("cuda"), task_prompt="robot manipulation",
+                 n_action_steps=None, rl100_resize_images=False):
     """
     Set up and load the policy model.
     
@@ -160,6 +161,16 @@ def setup_policy(pretrained_path, policy_type, device=torch.device("cuda"), task
     if policy_type == 'client':
         preprocessor, postprocessor = lambda obs: obs, lambda action: action
         return PolicyClient(task_prompt=task_prompt), preprocessor, postprocessor, None
+
+    if policy_type == "rl100_dp_2d":
+        # RL1002D is not a LeRobot PreTrainedPolicy. Load its separately
+        # exported Safetensors actor locally; no ModelServer/PolicyClient.
+        from kuavo_model.rl100_dp_2d.eval_policy import RL100DP2DEvalPolicy
+        policy = RL100DP2DEvalPolicy(
+            pretrained_path, device=device, n_action_steps=n_action_steps,
+            resize_images=rl100_resize_images,
+        )
+        return policy, lambda obs: obs, lambda action: action, Path(pretrained_path)
 
     policy, preprocessor, postprocessor, pretrained_model_dir = load_native_policy_bundle(
         pretrained_path=pretrained_path,
@@ -347,7 +358,9 @@ def kuavo_eval_autotest(config: KuavoConfig):
     task_prompt = getattr(cfg, 'task_prompt', "robot manipulation")
 
     policy, preprocessor, postprocessor, pretrained_model_dir = setup_policy(
-        pretrained_path, policy_type, device, task_prompt=task_prompt
+        pretrained_path, policy_type, device, task_prompt=task_prompt,
+        n_action_steps=getattr(cfg, "n_action_steps", None),
+        rl100_resize_images=bool(getattr(cfg, "rl100_resize_images", False)),
     )
     
     # first reset
