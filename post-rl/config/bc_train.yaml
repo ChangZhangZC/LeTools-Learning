@@ -6,10 +6,11 @@ data:
   root: "/root/bayes-tmp/kuavo_dataset/icra_task1_lerobot_jiayi_10bags/lerobot_v3.0"
   video_backend: "pyav"
   n_obs_steps: 2
-  horizon: 17             # RL100 no_pre_action=True => 16 modeled action steps
-  n_action_steps: 8       # actor's native selected chunk, NOT deployment execution_horizon
+  horizon: 33             # RL100 no_pre_action=True => 32 modeled action steps
+  n_action_steps: 16      # first half of the 32-step prediction; NOT deployment execution_horizon
 policy:
   resize: 224             # RL100 MultiImageObsEncoder preprocessing
+  # Random Crop disabled in build_policy(): crop_shape=None, random_crop=False
   share_rgb_model: false  # original RL100 configuration; separate RGB encoders
   use_group_norm: true
   num_train_timesteps: 100
