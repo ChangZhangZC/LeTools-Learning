@@ -1,3 +1,5 @@
+> **Archived Feature 03 notes.** Standalone `smoke_*.py` scripts referenced below were removed after acceptance. Current training/testing commands are in `post-rl/README.md`; maintained tests are `post-rl/test/test_*.py`. Historical descriptions are retained for traceability.
+
 # Feature 03 — Native RL1002D BC / IL
 
 This feature adds a thin training entrypoint. No LeRobot-to-Zarr conversion,
