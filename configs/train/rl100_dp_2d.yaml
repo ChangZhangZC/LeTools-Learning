@@ -1,5 +1,5 @@
-# Feature06 — production BC baseline, NOT a claim of tuned hyperparameters.
-# Keep post-rl/config/bc.yaml unchanged as the original 1-step smoke preset.
+# LeTools native RL100 DP-2D BC baseline; not a claim of tuned hyperparameters.
+# BC baseline configuration; historical Smoke Test presets are retired.
 # State/action/camera shape and names come exclusively from LeRobot v3 metadata.
 data:
   repo_id: "local/icra_task1_full"
