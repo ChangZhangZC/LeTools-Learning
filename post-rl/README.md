@@ -1,87 +1,112 @@
-# Native RL-100 DP-2D — Feature 01 bootstrap
+# Native RL1002D — BC training and deployment (LeTools)
 
-Scope: pin unmodified `Lei-Kun/RL-100` as a Git Submodule and check that
-its **native** 2D Actor imports and trains on a synthetic 3-RGB BC batch.
-This feature does **not** convert LeRobot data, build an offline replay
-buffer, implement a trainer, modify the algorithm, or integrate deployment.
-Old implementation code remains available on `arbim/dev-deprecated` only as a reference.
+The native RL-100 diffusion actor is pinned under third_party/rl100.
+LeRobot v3 loading, Kuavo deployment and BC training live in LeTools
+compatibility code under post-rl/. The original RL100, LeRobot and
+kuavo_model/train.py are not modified.
 
-## Source boundary
+## Production entrypoints
 
-- RL-100: `third_party/rl100` gitlink pinned to
-  `6b6afceb7eb12525398207b5d6e66908863dc385`.
-- Python import root: `third_party/rl100/RL-100`, containing `rl_100/`.
-- Existing `third_party/lerobot` gitlink: **unchanged**.
-- No changes inside the RL-100 submodule or `kdc_ARBiM`.
+- Config: post-rl/config/bc_train.yaml
+- Trainer: post-rl/src/rl100_compat/train_bc_production.py
+- Native RL1002D factory/helper functions: post-rl/src/rl100_compat/train_bc.py
+- LeRobot dataset contract: post-rl/src/rl100_compat/lerobot_data.py
+- Optional logging: post-rl/src/rl100_compat/bc_logging.py
+- Kuavo model server adapter: kuavo_server/adapters/rl100_2d.py
+- Selected-episode extraction utility: post-rl/test/extract_lerobot_test_subset.py
+- Unit tests: post-rl/test/test_*.py
 
-The RL-100 upstream checkout contains nested submodules, including a
-restricted/SSH URL. Initialize **only** the top-level RL-100 submodule for
-this phase, not recursively:
+The historical standalone smoke_*.py programs were removed after
+Feature01–06 acceptance; they are not part of the production workflow.
+The original bc.yaml and train_bc.py remain for compatibility with
+unit tests and the production model-construction helpers. Historical
+Feature02/03/04 notes are archival and may mention removed programs.
 
-```bash
-git submodule update --init third_party/rl100
-git submodule status third_party/rl100
-```
+## Dependency boundary
 
-## Preliminary environment adaptation
+The pinned RL-100 submodule's nested submodules may contain restricted
+URLs. Initialize required top-level checkouts, not recursively:
 
-LeTools documents Python 3.12 and uses Torch 2.9.1; the upstream RL-100
-environment is older. Do not install all upstream RL-100 dependencies
-or downgrade LeTools' Torch/Gymnasium preemptively. In the target
-training environment, record:
+    git submodule update --init third_party/rl100 third_party/lerobot
 
-```bash
-python -c "import sys,torch; print(sys.version); print(torch.__version__,torch.version.cuda)"
-command -v nvcc && nvcc --version || true
-```
+Environment-specific additional requirements are tracked in
+post-rl/requirements-rl100.txt. Do not downgrade the existing LeTools
+PyTorch/CUDA stack just to match historical RL100 package versions.
 
-The bundled *real* `pytorch3d_simplified` extension is imported by the
-native DP-2D actor even when point clouds are disabled. Its compilation
-must match the installed Torch/CUDA/compiler ABI. Do not replace it with
-an import stub. One consolidated preliminary extra-dependency file is
-`post-rl/requirements-rl100.txt`:
+## Train (working directory: repository root)
 
-```bash
-MAX_JOBS=2 python -m pip install --no-build-isolation -r post-rl/requirements-rl100.txt
-python -m pip check
-```
+Update the LOCAL LeRobot v3 dataset root in bc_train.yaml first.
+Current production model config: 2 observation frames, raw horizon=33,
+32 modeled actions, 16 selected model actions, no random crop.
+The current Kuavo adapter executes one action per inference when
+two-frame history must remain consecutive.
 
-`gym==0.26.2` is a compatibility dependency for the Actor's indirect
-imports; it does **not** establish support for upstream Gym environments.
-`zarr==2.18.7` and `numcodecs==0.15.1` serve the native
-`LinearNormalizer` import, **not** a request to add a Zarr conversion
-pipeline. The upstream default visual config requests pretrained R3M
-weights; this smoke test deliberately uses `weights=None`. R3M and
-production configurations are **not** validated by Feature 01.
+    python post-rl/src/rl100_compat/train_bc_production.py \
+      --config post-rl/config/bc_train.yaml
 
-## Tests (all under `post-rl/test/`)
+Default per-run output matches LeTools ACT/DP conventions:
 
-Run the complete checks **on the feature branch**, after code is integrated
-and dependencies are available in the designated environment:
+    outputs/train/rl100_2d_YYYYMMDD_HHMMSS/
+      resolved_config.yaml
+      metrics.jsonl
+      checkpoints/latest.pt
+      checkpoints/best.pt
+      tensorboard/          (only if tensorboard.enable=true)
+      wandb_run_id.txt      (only if wandb.enable=true)
 
-```bash
-python post-rl/test/smoke_rl100_native_2d.py --level imports
-python post-rl/test/smoke_rl100_native_2d.py --level forward --device cpu
-# GPU on the intended training machine:
-python post-rl/test/smoke_rl100_native_2d.py --level forward --device cuda:0
-```
+You may pass --no-timestamp to use the exact YAML output.dir.
+The programmatic train(cfg) function also uses output.dir exactly,
+which is important for test reproducibility.
 
-The synthetic check uses 3 x 84x84 RGB, 16D state/action, 2 observation
-frames, 9-step sample horizon and a 4-step predicted action chunk.
-It checks Actor and visual-encoder imports from this exact checkout,
-finite BC loss, U-Net and encoder gradients, and `predict_action`
-shape `[1,4,16]`. Its small, randomly initialized model is **not**
-a Kuavo training recipe or a deployment checkpoint.
+Resume a specific run with the ORIGINAL settings and exact timestamped path:
 
-The smoke test uses a small `UserDict` leaf wrapper around
-`shape_meta['obs']`: the unmodified RL1002D constructor calls recursive
-`dict_apply` on that metadata, which otherwise descends into each
-plain specification dict before it can retrieve `['shape']`.
-This is an external input-contract shim, not a policy change.
+    python post-rl/src/rl100_compat/train_bc_production.py \
+      --config post-rl/config/bc_train.yaml \
+      --resume \
+      --output-dir outputs/train/rl100_2d_YYYYMMDD_HHMMSS
 
-## Promotion gate
+Do not resume best.pt: it is a deployment-only validation-selected
+actor. Only latest.pt includes optimizer/scheduler/EMA/RNG state.
+Do not change total training Steps/Batch Size or architecture when
+resuming an existing run.
 
-Keep the feature off `arbim/dev` until the target machine confirms:
-submodule SHA; imports; synthetic forward/backward; encoder and denoiser
-gradients; inference output; and a reproducible environment version log.
-No PPO/IQL/Dynamics, real-data BC or Kuavo rollout is claimed by these tests.
+## Logging audit and options
+
+- Always on: stdout + metrics.jsonl + resolved_config.yaml.
+- JSONL train: optimizer step, loss, LR, equivalent epoch, elapsed time.
+- JSONL val: held-out diffusion-denoising loss and EMA/raw selection.
+- Optional WandB: set wandb.enable=true (requires installed wandb
+  and login or mode=offline). Project is configured in YAML; a saved
+  wandb_run_id.txt lets resume reuse the same WandB run.
+  Train/val series use trainer_step as the x-axis.
+- Optional TensorBoard: set tensorboard.enable=true (requires installed
+  tensorboard). Use: tensorboard --logdir outputs/train
+  The writer uses purge_step on resume so post-checkpoint entries are
+  not double-counted.
+- No task success metrics are produced without a Kuavo rollout or
+  environment runner; validation loss measures BC denoising only.
+- Neither logging package is imported if disabled.
+
+LeTools ACT currently enables WandB by default; LeTools DP disables
+WandB by default. BC production follows the DP default (disabled)
+while allowing explicit enablement. Native ACT/DP do not provide a
+built-in TensorBoard toggle in their examined YAML.
+
+## Local unit checks (GPU not required for logging contracts)
+
+    PYTHONPATH=post-rl/src python -m unittest discover \
+      -s post-rl/test -p test_bc_logging.py -v
+
+    PYTHONPATH=post-rl/src python -m unittest discover \
+      -s post-rl/test -p test_bc_production.py -v
+
+These test synthetic trainer/logging contracts. Actual full-model
+VRAM usage, 600-episode training performance and Kuavo success rates
+still require separate measurements before a full run.
+
+## Historical context
+
+Original native integration tasks and acceptance details are retained
+in FEATURE02_LEROBOT.md, FEATURE03_BC.md, FEATURE04_DEPLOY.md
+and FEATURE06_BC_PRODUCTION.md. Refer to the current production entry
+above for live commands rather than earlier Smoke Test scripts.
