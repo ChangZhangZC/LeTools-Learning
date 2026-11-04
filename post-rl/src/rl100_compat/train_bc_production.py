@@ -448,7 +448,13 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     print(f"[BC] state={view.contract.state_dim} action={view.contract.action_dim} "
           f"cameras={list(view.contract.source_to_rgb)}; "
           f"resume_step={start_step}, target={last_step}/{total_steps}")
-    metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
+    # Optional telemetry may initialize its own RNG. Keep training noise
+    # identical with/without logging, including after an exact resume.
+    logger_rng = capture_rng_state()
+    try:
+        metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
+    finally:
+        restore_rng_state(logger_rng)
     try:
         model.train()
         start_time = time.monotonic()
