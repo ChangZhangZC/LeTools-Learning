@@ -45,6 +45,35 @@ def resolve_output_dir(path: str | Path) -> Path:
     return (selected if selected.is_absolute() else ROOT / selected).resolve()
 
 
+def training_limits(cfg) -> tuple[int | None, int | None]:
+    """Step and complete-epoch caps are independently optional."""
+    limits = []
+    for key in ("steps", "epochs"):
+        value = cfg.training.get(key)
+        if value is not None and (isinstance(value, bool) or
+                                  not isinstance(value, int) or value < 1):
+            raise ValueError(f"training.{key} must be a positive integer or null")
+        limits.append(value)
+    if limits[0] is None and limits[1] is None:
+        raise ValueError("At least one of training.steps or training.epochs is required")
+    return limits[0], limits[1]
+
+
+def resolve_training_budget(cfg, train_windows: int) -> tuple[int, int]:
+    """Translate complete train-only epochs to steps using the existing sampler.
+
+    The final partial batch counts as one optimizer step per epoch.
+    """
+    steps, epochs = training_limits(cfg)
+    batch_size = int(cfg.training.batch_size)
+    if train_windows < 1 or batch_size < 1:
+        raise ValueError("train_windows and training.batch_size must be positive")
+    steps_per_epoch = math.ceil(train_windows / batch_size)
+    caps = [cap for cap in (steps, epochs * steps_per_epoch if epochs is not None else None)
+            if cap is not None]
+    return min(caps), steps_per_epoch
+
+
 def check_config(cfg) -> None:
     """Reject incompatible horizons, nonfinite budgets, and missing features."""
     horizon, obs = int(cfg.data.horizon), int(cfg.data.n_obs_steps)
@@ -59,8 +88,9 @@ def check_config(cfg) -> None:
                          "2**len(policy.down_dims)")
     if not 1 <= int(cfg.policy.num_inference_steps) <= int(cfg.policy.num_train_timesteps):
         raise ValueError("Invalid diffusion inference/training timestep count")
-    if int(cfg.training.steps) < 1 or int(cfg.training.batch_size) < 1:
-        raise ValueError("training.steps and batch_size must be positive")
+    training_limits(cfg)
+    if int(cfg.training.batch_size) < 1:
+        raise ValueError("training.batch_size must be positive")
     for name in ("num_workers", "lr_warmup_steps"):
         if int(cfg.training[name]) < 0:
             raise ValueError(f"training.{name} must be nonnegative")
@@ -218,7 +248,7 @@ def restore_rng_state(state: dict) -> None:
 def _resume_signature(cfg) -> dict:
     """Optimizer schedule and data/action definition cannot drift on resume."""
     tr = cfg.training
-    return {
+    signature = {
         "data": OmegaConf.to_container(cfg.data, resolve=True),
         "policy": OmegaConf.to_container(cfg.policy, resolve=True),
         "training": {k: tr[k] for k in (
@@ -228,6 +258,10 @@ def _resume_signature(cfg) -> dict:
         )},
         "validation": OmegaConf.to_container(cfg.validation, resolve=True),
     }
+    # Preserve old step-only signature for previously saved training checkpoints.
+    if tr.get("epochs") is not None:
+        signature["training"]["epochs"] = tr.epochs
+    return signature
 
 
 def _write_metric(path: Path, **values) -> None:
@@ -330,10 +364,6 @@ def _make_best_payload(cfg, view, selected_model, step: int, split: dict,
 
 def train(cfg, *, stop_after: int | None = None) -> Path:
     check_config(cfg)
-    total_steps = int(cfg.training.steps)
-    if stop_after is not None and not 1 <= stop_after <= total_steps:
-        raise ValueError("stop_after must be in [1, training.steps]")
-    last_step = stop_after if stop_after is not None else total_steps
     device = torch.device(str(cfg.training.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -365,6 +395,10 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         view, train_ids, int(cfg.data.n_obs_steps), int(cfg.data.horizon))
     val_anchors = episode_anchor_indices(
         view, val_ids, int(cfg.data.n_obs_steps), int(cfg.data.horizon))
+    total_steps, steps_per_epoch = resolve_training_budget(cfg, len(train_anchors))
+    if stop_after is not None and not 1 <= stop_after <= total_steps:
+        raise ValueError("stop_after must be in [1, effective total_steps]")
+    last_step = stop_after if stop_after is not None else total_steps
     saved = None
     if resume:
         saved = torch.load(paths["latest"], map_location="cpu", weights_only=True)
@@ -372,6 +406,8 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
             raise ValueError("Only production latest.pt is resumable (not deploy best.pt)")
         if saved.get("resume_signature") != _resume_signature(cfg) or saved.get("split") != split:
             raise ValueError("Checkpoint architecture, data, optimizer, or episode split differs")
+        if saved.get("effective_total_steps", total_steps) != total_steps:
+            raise ValueError("Checkpoint effective training budget differs")
         if dict(saved["camera_map"]) != dict(view.contract.source_to_rgb):
             raise ValueError("Camera metadata changed between training runs")
         if saved["state_names"] != list(view.contract.state_names) or saved["action_names"] != list(view.contract.action_names):
@@ -450,6 +486,9 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     )
     print(f"[BC] episodes={episodes} train={train_ids} val={val_ids}; "
           f"anchors={len(train_anchors)}/{len(val_anchors)}")
+    cap_steps, cap_epochs = training_limits(cfg)
+    print(f"[BC] budget: steps={cap_steps}, epochs={cap_epochs}, "
+          f"steps_per_epoch={steps_per_epoch}, effective_total_steps={total_steps}")
     print(f"[BC] state={view.contract.state_dim} action={view.contract.action_dim} "
           f"cameras={list(view.contract.source_to_rgb)}; "
           f"resume_step={start_step}, target={last_step}/{total_steps}")
@@ -482,7 +521,7 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
 
             if step % int(cfg.training.log_every) == 0 or step == last_step:
                 lr = optimizer.param_groups[0]["lr"]
-                epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
+                epoch_progress = step / steps_per_epoch
                 _write_metric(paths["metrics"], phase="train", step=step,
                               epoch_equivalent=round(epoch_progress, 6),
                               loss=float(loss.item()), lr=float(lr),
@@ -517,6 +556,7 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
                     cfg, view, model, optimizer, scheduler, ema,
                     step, split, best_loss, best_step,
                 )
+                latest["effective_total_steps"] = total_steps
                 _save_checkpoint(paths["latest"], latest)
                 if bool(cfg.training.keep_step_checkpoints):
                     snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
