@@ -194,6 +194,14 @@ def run_single_episode(config, policy, preprocessor, postprocessor, episode, out
         max_episode_steps=cfg.max_episode_steps,
         config=config,
     )
+    if cfg.policy_type == "rl100_dp_2d":
+        # Do not send a mismatched action vector to Kuavo joints or grippers.
+        if tuple(env.action_space.shape) != (policy.action_dim,):
+            raise ValueError(
+                f"RL100 actor action_dim={policy.action_dim}, but simulator "
+                f"action_space.shape={env.action_space.shape}. Check platform, "
+                "eef_type, which_arm and original training action order."
+            )
 
     run_single_ros_manager = ROSManager()
     # Setup ROS subscribers and services
