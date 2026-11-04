@@ -1,7 +1,7 @@
-# Additional packages for the *native* RL-100 DP-2D actor only.
+# Additional packages for the *native* RL-100 DP-2D baseline only.
 # Keep LeTools' original requirements and pinned LeRobot untouched.
 # Run from the LeTools-Learning repository root after submodule initialization:
-#   MAX_JOBS=2 python -m pip install --no-build-isolation -r post-rl/requirements-rl100.txt
+#   MAX_JOBS=2 python -m pip install --no-build-isolation -r kuavo_model/rl100_dp_2d/requirements.txt
 #
 # This is a preliminary, isolated bootstrap manifest, not a validated lockfile.
 # Check actual Python / torch / CUDA / compiler versions before installing.

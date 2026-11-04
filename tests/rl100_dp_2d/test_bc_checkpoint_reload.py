@@ -16,11 +16,11 @@ import torch
 from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "post-rl" / "src"))
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
 
-from rl100_compat.lerobot_data import open_lerobot_bc_dataset  # noqa: E402
-from rl100_compat.train_bc import build_policy  # noqa: E402
+from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
+from kuavo_model.rl100_dp_2d.policy_factory import build_policy  # noqa: E402
 
 
 def main() -> None:

@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "post-rl" / "src"))
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
-from rl100_compat.train_bc import assert_valid_action_targets, make_episode_sampler  # noqa: E402
+from kuavo_model.rl100_dp_2d.bc_utils import assert_valid_action_targets, make_episode_sampler  # noqa: E402
 
 
 def fake_view(ends):

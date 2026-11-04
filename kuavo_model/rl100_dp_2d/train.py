@@ -1,10 +1,9 @@
-"""Production BC orchestration around the unmodified native RL1002D.
+"""BC training entrypoint for LeTools native RL100 DP-2D baseline.
 
-Feature03's train_bc.py remains a one-step regression smoke. This entrypoint
-reuses its actor/loss/normalizer/checkpoint schema while adding episode-heldout
+Uses the original RL1002D actor/loss/normalizer/checkpoint schema with episode-heldout
 validation, train-only normalizer statistics, deterministic step sampling,
 EMA-based model selection, resumable full training state, and JSONL metrics.
-Neither original RL-100 nor LeTools training/runtime is edited.
+Neither original RL-100 nor existing LeTools ACT/DP training/runtime is edited.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import math
 import random
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -21,21 +21,28 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
-ROOT = Path(__file__).resolve().parents[3]
-for directory in (ROOT / "third_party" / "lerobot" / "src",
-                  ROOT / "third_party" / "rl100" / "RL-100",
-                  ROOT / "post-rl" / "src"):
+ROOT = Path(__file__).resolve().parents[2]
+for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
+                  ROOT / "third_party" / "rl100" / "RL-100"):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from rl100_compat.lerobot_data import open_lerobot_bc_dataset  # noqa: E402
-from rl100_compat.train_bc import (  # noqa: E402
+from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
+from kuavo_model.rl100_dp_2d.metrics import BCMetricLogger  # noqa: E402
+from kuavo_model.rl100_dp_2d.bc_utils import (  # noqa: E402
     _payload, _save_checkpoint, _to_device, assert_valid_action_targets,
-    build_policy, make_episode_sampler,
+    make_episode_sampler,
 )
+from kuavo_model.rl100_dp_2d.policy_factory import build_policy  # noqa: E402
 from rl_100.model.common.lr_scheduler import get_scheduler  # noqa: E402
 from rl_100.model.common.normalizer import LinearNormalizer  # noqa: E402
 from rl_100.model.diffusion.ema_model import EMAModel  # noqa: E402
+
+
+def resolve_output_dir(path: str | Path) -> Path:
+    """Resolve relative paths against LeTools repository root, like train.py."""
+    selected = Path(path).expanduser()
+    return (selected if selected.is_absolute() else ROOT / selected).resolve()
 
 
 def check_config(cfg) -> None:
@@ -142,7 +149,7 @@ def build_train_only_normalizer(dataset, train_ids: list[int]) -> LinearNormaliz
     Do not use dataset.meta.stats: those include the held-out validation episodes.
     The original native normalization math is unchanged.
     """
-    from rl100_compat.lerobot_data import ACTION_KEY, STATE_KEY
+    from kuavo_model.rl100_dp_2d.dataset import ACTION_KEY, STATE_KEY
     raw = dataset.hf_dataset.select_columns([STATE_KEY, ACTION_KEY])
     dims = {
         STATE_KEY: int(dataset.features[STATE_KEY]["shape"][0]),
@@ -330,7 +337,7 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     device = torch.device(str(cfg.training.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
-    output = Path(str(cfg.output.dir)).expanduser().resolve()
+    output = resolve_output_dir(str(cfg.output.dir))
     paths = {
         "latest": output / "checkpoints" / "latest.pt",
         "best": output / "checkpoints" / "best.pt",
@@ -446,73 +453,89 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     print(f"[BC] state={view.contract.state_dim} action={view.contract.action_dim} "
           f"cameras={list(view.contract.source_to_rgb)}; "
           f"resume_step={start_step}, target={last_step}/{total_steps}")
-    model.train()
-    start_time = time.monotonic()
-    for step, sample in enumerate(train_loader, start=start_step + 1):
-        assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
-        batch = _to_device(sample, device)
-        optimizer.zero_grad(set_to_none=True)
-        loss, details = model.compute_loss(batch)
-        if loss.ndim != 0 or not torch.isfinite(loss).item():
-            raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
-        loss.backward()
-        grad_limit = float(cfg.training.max_grad_norm)
-        if grad_limit:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
-        optimizer.step()
-        scheduler.step()
-        if ema is not None:
-            ema.step(model)
-            _sync_ema_buffers(ema, model)
+    # Optional telemetry may initialize its own RNG. Keep training noise
+    # identical with/without logging, including after an exact resume.
+    logger_rng = capture_rng_state()
+    try:
+        metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
+    finally:
+        restore_rng_state(logger_rng)
+    try:
+        model.train()
+        start_time = time.monotonic()
+        for step, sample in enumerate(train_loader, start=start_step + 1):
+            assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
+            batch = _to_device(sample, device)
+            optimizer.zero_grad(set_to_none=True)
+            loss, details = model.compute_loss(batch)
+            if loss.ndim != 0 or not torch.isfinite(loss).item():
+                raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
+            loss.backward()
+            grad_limit = float(cfg.training.max_grad_norm)
+            if grad_limit:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
+            optimizer.step()
+            scheduler.step()
+            if ema is not None:
+                ema.step(model)
+                _sync_ema_buffers(ema, model)
 
-        if step % int(cfg.training.log_every) == 0 or step == last_step:
-            lr = optimizer.param_groups[0]["lr"]
-            epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
-            _write_metric(paths["metrics"], phase="train", step=step,
-                          epoch_equivalent=round(epoch_progress, 6),
-                          loss=float(loss.item()), lr=float(lr),
-                          elapsed_s=round(time.monotonic() - start_time, 3))
-            print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
+            if step % int(cfg.training.log_every) == 0 or step == last_step:
+                lr = optimizer.param_groups[0]["lr"]
+                epoch_progress = step / math.ceil(len(train_anchors) / int(cfg.training.batch_size))
+                _write_metric(paths["metrics"], phase="train", step=step,
+                              epoch_equivalent=round(epoch_progress, 6),
+                              loss=float(loss.item()), lr=float(lr),
+                              elapsed_s=round(time.monotonic() - start_time, 3))
+                metric_logger.train(step=step, loss=float(loss.item()),
+                                    lr=float(lr), epoch=float(epoch_progress))
+                print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
 
-        if step % int(cfg.training.val_every) == 0 or step == total_steps:
-            selected = ema.averaged_model if ema is not None else model
-            val_loss = evaluate(
-                selected, val_loader, int(cfg.data.n_obs_steps),
-                device, int(cfg.validation.seed),
-                int(cfg.validation.max_batches),
-            )
-            _write_metric(paths["metrics"], phase="val", step=step,
-                          loss=float(val_loss),
-                          weights="ema" if ema is not None else "raw")
-            print(f"[VAL] step={step} loss={val_loss:.6f}")
-            if best_loss is None or val_loss < best_loss:
-                best_loss, best_step = float(val_loss), step
-                _save_checkpoint(paths["best"], _make_best_payload(
-                    cfg, view, selected, step, split, best_loss,
-                    "ema" if ema is not None else "raw",
-                ))
-                print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+            if step % int(cfg.training.val_every) == 0 or step == total_steps:
+                selected = ema.averaged_model if ema is not None else model
+                val_loss = evaluate(
+                    selected, val_loader, int(cfg.data.n_obs_steps),
+                    device, int(cfg.validation.seed),
+                    int(cfg.validation.max_batches),
+                )
+                _write_metric(paths["metrics"], phase="val", step=step,
+                              loss=float(val_loss),
+                              weights="ema" if ema is not None else "raw")
+                print(f"[VAL] step={step} loss={val_loss:.6f}")
+                if best_loss is None or val_loss < best_loss:
+                    best_loss, best_step = float(val_loss), step
+                    _save_checkpoint(paths["best"], _make_best_payload(
+                        cfg, view, selected, step, split, best_loss,
+                        "ema" if ema is not None else "raw",
+                    ))
+                    print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+                metric_logger.validation(step=step, loss=float(val_loss),
+                                         best_loss=float(best_loss))
 
-        if step % int(cfg.training.save_every) == 0 or step == last_step:
-            latest = _make_resume_payload(
-                cfg, view, model, optimizer, scheduler, ema,
-                step, split, best_loss, best_step,
-            )
-            _save_checkpoint(paths["latest"], latest)
-            if bool(cfg.training.keep_step_checkpoints):
-                snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
-                _save_checkpoint(snapshot, latest)
-            print(f"[PASS] training checkpoint: step={step}")
-    if start_step >= last_step:
-        print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
+            if step % int(cfg.training.save_every) == 0 or step == last_step:
+                latest = _make_resume_payload(
+                    cfg, view, model, optimizer, scheduler, ema,
+                    step, split, best_loss, best_step,
+                )
+                _save_checkpoint(paths["latest"], latest)
+                if bool(cfg.training.keep_step_checkpoints):
+                    snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
+                    _save_checkpoint(snapshot, latest)
+                print(f"[PASS] training checkpoint: step={step}")
+        if start_step >= last_step:
+            print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
+    finally:
+        metric_logger.close()
     return paths["latest"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("post-rl/config/bc_train.yaml"))
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "train" / "rl100_dp_2d.yaml")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--resume", action="store_true", help="Resume same run from latest.pt")
+    parser.add_argument("--no-timestamp", action="store_true",
+                        help="Use output.dir as-is, like LeTools train.py --no-timestamp")
     parser.add_argument("--stop-after", type=int, default=None,
                         help="Test interruption at this step; scheduler total remains unchanged")
     args = parser.parse_args()
@@ -521,6 +544,12 @@ def main() -> None:
         cfg.output.dir = str(args.output_dir)
     if args.resume:
         cfg.training.resume = True
+    if not bool(cfg.training.resume) and not args.no_timestamp:
+        output = Path(str(cfg.output.dir))
+        cfg.output.dir = str(output.parent / (
+            f"{output.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        ))
+    print(f"[BC] output_dir: {resolve_output_dir(str(cfg.output.dir))}")
     train(cfg, stop_after=args.stop_after)
 
 

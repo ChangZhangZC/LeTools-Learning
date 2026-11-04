@@ -7,8 +7,9 @@ from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from rl100_compat.lerobot_data import (  # noqa: E402
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from kuavo_model.rl100_dp_2d.dataset import (  # noqa: E402
     RL100LeRobotDataset,
     build_delta_timestamps,
     contract_from_features,

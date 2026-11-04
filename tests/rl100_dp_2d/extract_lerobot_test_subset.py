@@ -1,11 +1,11 @@
-"""Copy a small, self-contained LeRobot v3 episode subset for BC smoke tests.
+"""Copy a small, self-contained LeRobot v3 episode subset for BC diagnostics.
 
 Use the PINNED native LeRobot reader/writer, not ad hoc MP4/Parquet copying:
 LeRobot v3 can co-pack several episodes in one video and data chunk. Only
 selected episodes are decoded and written; original metadata and dataset
 are never modified. Output videos are re-encoded by native LeRobot.
 
-Run from repo root; see post-rl/FEATURE06_BC_PRODUCTION.md.
+Run from repo root; see docs/models/rl100_dp_2d/README.md.
 """
 from __future__ import annotations
 

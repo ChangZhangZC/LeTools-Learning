@@ -6,6 +6,7 @@ import io
 import random
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,10 +17,10 @@ import torch
 from omegaconf import OmegaConf
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "post-rl" / "src"))
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
 
-from rl100_compat import train_bc_production as prod  # noqa: E402
+from kuavo_model.rl100_dp_2d import train as prod  # noqa: E402
 from rl_100.model.common.normalizer import LinearNormalizer  # noqa: E402
 
 
@@ -105,7 +106,9 @@ class TinyActor(torch.nn.Module):
 
 
 def config_for_test(output):
-    cfg = OmegaConf.load(ROOT / "post-rl" / "config" / "bc.yaml")
+    cfg = OmegaConf.load(ROOT / "configs" / "train" / "rl100_dp_2d.yaml")
+    cfg.data.horizon = 9
+    cfg.data.n_action_steps = 4
     cfg.data.repo_id = "fake/robot"
     cfg.data.root = "fake"
     cfg.training.steps = 3
@@ -130,6 +133,16 @@ def config_for_test(output):
 
 
 class ProductionBCUnitTests(unittest.TestCase):
+    def test_canonical_bc_defaults_32_predicted_16_selected(self):
+        cfg = OmegaConf.load(ROOT / "configs/train/rl100_dp_2d.yaml")
+        prod.check_config(cfg)
+        self.assertEqual(int(cfg.data.n_obs_steps), 2)
+        self.assertEqual(int(cfg.data.horizon) - int(cfg.data.n_obs_steps) + 1, 32)
+        self.assertEqual(int(cfg.data.n_action_steps), 16)
+        self.assertEqual(str(cfg.output.dir), "outputs/train/rl100_dp_2d")
+        self.assertFalse(bool(cfg.wandb.enable))
+        self.assertFalse(bool(cfg.tensorboard.enable))
+
     def test_split_by_episode_never_by_frame(self):
         first = prod.split_episode_ids(10, .2, 42)
         self.assertEqual(first, prod.split_episode_ids(10, .2, 42))
@@ -241,6 +254,96 @@ class ProductionBCUnitTests(unittest.TestCase):
             self.assertNotIn("optimizer", best)
             # Both train and held-out datasets must remain disjoint on resume.
             self.assertFalse(set(best["split"]["train"]) & set(best["split"]["val"]))
+
+
+    def test_optional_wandb_init_cannot_perturb_training_rng(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with_wb = config_for_test(root / "with_logging")
+            without_wb = config_for_test(root / "without_logging")
+            with_wb.wandb = {
+                "enable": True, "project": "test-project",
+                "entity": None, "mode": "offline",
+            }
+
+            class FakeRun:
+                id = "test-run-123"
+                def define_metric(self, *args, **kwargs):
+                    pass
+                def log(self, values):
+                    pass
+                def finish(self):
+                    pass
+
+            wandb = types.ModuleType("wandb")
+            def init_wandb(**kwargs):
+                random.seed(123456)
+                np.random.seed(123456)
+                torch.manual_seed(123456)
+                return FakeRun()
+            wandb.init = init_wandb
+            with (
+                patch.dict(sys.modules, {"wandb": wandb}),
+                patch.object(prod, "open_lerobot_bc_dataset", return_value=FakeView()),
+                patch.object(prod, "build_policy", side_effect=lambda cfg, contract: TinyActor()),
+            ):
+                prod.train(with_wb)
+                prod.train(without_wb)
+            one = torch.load(root / "with_logging/checkpoints/latest.pt", weights_only=True)
+            two = torch.load(root / "without_logging/checkpoints/latest.pt", weights_only=True)
+            for key in one["model"]:
+                self.assertTrue(torch.equal(one["model"][key], two["model"][key]), key)
+            for key in one["ema_model"]:
+                self.assertTrue(torch.equal(one["ema_model"][key], two["ema_model"][key]), key)
+
+    def test_relative_output_paths_resolve_at_repo_root(self):
+        self.assertEqual(
+            prod.resolve_output_dir("outputs/train/rl100_dp_2d"),
+            (ROOT / "outputs/train/rl100_dp_2d").resolve(),
+        )
+
+    def test_cli_timestamp_matches_lerobot_and_resume_preserves_path(self):
+        import re
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "bc_train.yaml"
+            cfg = config_for_test(Path(temp) / "unused")
+            cfg.output.dir = str(Path(temp) / "outputs/train/rl100_dp_2d")
+            OmegaConf.save(cfg, config_path)
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train.py", "--config", str(config_path),
+                ]),
+            ):
+                prod.main()
+            first = runner.call_args.args[0]
+            self.assertRegex(
+                str(first.output.dir), r"rl100_dp_2d_\d{8}_\d{6}$",
+            )
+
+            exact = Path(temp) / "outputs/train/rl100_dp_2d_20261104_090000"
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train.py", "--config", str(config_path),
+                    "--resume", "--output-dir", str(exact),
+                ]),
+            ):
+                prod.main()
+            self.assertEqual(str(runner.call_args.args[0].output.dir), str(exact))
+            self.assertTrue(runner.call_args.args[0].training.resume)
+
+            with (
+                patch.object(prod, "train") as runner,
+                patch.object(sys, "argv", [
+                    "train.py", "--config", str(config_path),
+                    "--no-timestamp",
+                ]),
+            ):
+                prod.main()
+            self.assertEqual(
+                str(runner.call_args.args[0].output.dir), str(cfg.output.dir),
+            )
 
 
 if __name__ == "__main__":

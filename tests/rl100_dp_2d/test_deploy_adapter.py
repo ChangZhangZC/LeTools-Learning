@@ -12,7 +12,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from kuavo_server.adapters.rl100_2d import RL1002DKuavoAdapter  # noqa: E402
+from kuavo_server.adapters.rl100_dp_2d import RL100DP2DKuavoAdapter  # noqa: E402
 from kuavo_server.builtin_adapters import ensure_adapter_loaded  # noqa: E402
 from kuavo_server.runtime import get_adapter_class  # noqa: E402
 
@@ -31,7 +31,7 @@ class FakePolicy:
 
 
 def fake_adapter(*, obs_steps=2, execution_horizon=1):
-    obj = object.__new__(RL1002DKuavoAdapter)
+    obj = object.__new__(RL100DP2DKuavoAdapter)
     obj.state_dim = 4
     obj.action_dim = 4
     obj.n_obs_steps = obs_steps
@@ -70,8 +70,8 @@ def obs(state=1, *, hwc=False, width=6):
 
 class DeployAdapterUnitTests(unittest.TestCase):
     def test_registered_only_via_builtin_map(self):
-        ensure_adapter_loaded("rl100_2d")
-        self.assertIs(get_adapter_class("rl100_2d"), RL1002DKuavoAdapter)
+        ensure_adapter_loaded("rl100_dp_2d")
+        self.assertIs(get_adapter_class("rl100_dp_2d"), RL100DP2DKuavoAdapter)
 
     def test_image_and_state_history_reset(self):
         adapter = fake_adapter()

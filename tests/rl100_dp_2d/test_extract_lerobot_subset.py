@@ -9,7 +9,9 @@ import numpy as np
 import torch
 
 HERE = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "third_party" / "lerobot" / "src"))
 from extract_lerobot_test_subset import _frame_for_writer  # noqa: E402
 from lerobot.utils.constants import DEFAULT_FEATURES  # noqa: E402
 

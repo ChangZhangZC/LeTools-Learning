@@ -2,7 +2,7 @@
 
 All model conversion stays in this new adapter. The only necessary LeTools
 source edit is one lazy registration in kuavo_server/builtin_adapters.py.
-The policy checkpoint is the Feature03 BC training state_dict, not a
+The policy checkpoint is the LeTools RL100 DP-2D BC state_dict, not a
 Hugging Face or LeRobot PreTrainedPolicy.
 """
 from __future__ import annotations
@@ -30,10 +30,10 @@ def _tensor_input(value: Any):
 
 
 @register_adapter
-class RL1002DKuavoAdapter(ModelServerAdapter):
-    """Serve an unmodified RL1002D trained by post-rl/src/rl100_compat/train_bc.py."""
+class RL100DP2DKuavoAdapter(ModelServerAdapter):
+    """Serve an unmodified RL1002D trained by kuavo_model/rl100_dp_2d/train.py."""
 
-    name = "rl100_2d"
+    name = "rl100_dp_2d"
 
     def __init__(
         self,
@@ -62,15 +62,15 @@ class RL1002DKuavoAdapter(ModelServerAdapter):
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError(f"CUDA not available: {device}")
 
-        # Lazy-import native RL100 and the Feature03 model factory only here.
-        # 'serve.py --adapter rl100_2d --help' must not instantiate the model.
+        # Lazy-import native RL100 and the RL100 DP-2D model factory only here.
+        # 'serve.py --adapter rl100_dp_2d --help' must not instantiate the model.
         root = kuavo_repo_root()
-        for path in (root / "third_party" / "rl100" / "RL-100", root / "post-rl" / "src"):
+        for path in (root / "third_party" / "rl100" / "RL-100", root):
             if not path.is_dir():
                 raise FileNotFoundError(f"Missing RL100 integration path: {path}")
             if str(path) not in sys.path:
                 sys.path.insert(0, str(path))
-        from rl100_compat.train_bc import build_policy
+        from kuavo_model.rl100_dp_2d.policy_factory import build_policy
 
         saved = torch.load(self.checkpoint, map_location="cpu", weights_only=True)
         for required in ("config", "shape_meta", "model", "camera_map", "state_names", "action_names"):
@@ -167,7 +167,7 @@ class RL1002DKuavoAdapter(ModelServerAdapter):
 
     @classmethod
     def add_cli_args(cls, parser: ArgumentParser) -> None:
-        parser.add_argument("--checkpoint", required=True, help="Feature03 latest.pt path")
+        parser.add_argument("--checkpoint", required=True, help="RL100 DP-2D latest.pt or best.pt path")
         parser.add_argument("--device", default="cuda:0")
         parser.add_argument("--execution_horizon", type=int, default=0,
                             help="0=1 when n_obs_steps>1 (fresh obs each step), "
@@ -181,7 +181,7 @@ class RL1002DKuavoAdapter(ModelServerAdapter):
                             help="Explicitly resize incoming RGB to saved training shape")
 
     @classmethod
-    def from_args(cls, args: Namespace) -> "RL1002DKuavoAdapter":
+    def from_args(cls, args: Namespace) -> "RL100DP2DKuavoAdapter":
         return cls(
             checkpoint=args.checkpoint,
             device=args.device,
