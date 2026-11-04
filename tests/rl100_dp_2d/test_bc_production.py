@@ -171,6 +171,41 @@ class ProductionBCUnitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "train_windows"):
             prod.resolve_training_budget(cfg, 0)
 
+    def test_train_loader_matches_letools_diffusion_worker_options(self):
+        cfg = config_for_test("unused")
+        cfg.training.num_workers = 4
+        cfg.training.prefetch_factor = 4
+        cfg.training.persistent_workers = True
+        opts = prod._train_loader_options(cfg, torch.device("cuda:0"))
+        self.assertEqual(opts, {
+            "num_workers": 4, "pin_memory": True,
+            "prefetch_factor": 4, "persistent_workers": True,
+        })
+        # Actual PyTorch loader receives the intended values.
+        loader = torch.utils.data.DataLoader(
+            torch.arange(4), batch_size=2, **opts,
+        )
+        self.assertEqual(loader.prefetch_factor, 4)
+        self.assertTrue(loader.persistent_workers)
+        self.assertEqual(loader.num_workers, 4)
+
+        # CPU or num_workers=0 must still be valid; PyTorch disallows
+        # positive prefetch or persistent workers for single-process mode.
+        cfg.training.num_workers = 0
+        no_worker = prod._train_loader_options(cfg, torch.device("cpu"))
+        self.assertIsNone(no_worker["prefetch_factor"])
+        self.assertFalse(no_worker["persistent_workers"])
+        self.assertFalse(no_worker["pin_memory"])
+        torch.utils.data.DataLoader(torch.arange(4), batch_size=2, **no_worker)
+
+        cfg.training.prefetch_factor = 0
+        with self.assertRaisesRegex(ValueError, "prefetch_factor"):
+            prod.check_config(cfg)
+        cfg.training.prefetch_factor = 4
+        cfg.training.persistent_workers = "yes"
+        with self.assertRaisesRegex(ValueError, "persistent_workers"):
+            prod.check_config(cfg)
+
     def test_epoch_only_training_final_validation_and_exact_resume(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

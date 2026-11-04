@@ -96,6 +96,10 @@ def check_config(cfg) -> None:
     for name in ("num_workers", "lr_warmup_steps"):
         if int(cfg.training[name]) < 0:
             raise ValueError(f"training.{name} must be nonnegative")
+    if int(cfg.training.get("prefetch_factor", 4)) < 1:
+        raise ValueError("training.prefetch_factor must be positive")
+    if not isinstance(cfg.training.get("persistent_workers", True), bool):
+        raise ValueError("training.persistent_workers must be a boolean")
     for key in ("save_every", "log_every", "val_every"):
         if int(cfg.training[key]) < 1:
             raise ValueError(f"training.{key} must be positive")
@@ -111,6 +115,17 @@ def check_config(cfg) -> None:
         raise ValueError("validation.fraction must be in (0,1)")
     if int(cfg.validation.batch_size) < 1 or int(cfg.validation.max_batches) < 0:
         raise ValueError("Invalid validation batch_size/max_batches")
+
+
+def _train_loader_options(cfg, device: torch.device) -> dict:
+    """Match LeTools Diffusion's worker/prefetch settings without touching sampling."""
+    workers = int(cfg.training.num_workers)
+    return {
+        "num_workers": workers,
+        "pin_memory": device.type == "cuda",
+        "prefetch_factor": int(cfg.training.get("prefetch_factor", 4)) if workers > 0 else None,
+        "persistent_workers": bool(cfg.training.get("persistent_workers", True)) and workers > 0,
+    }
 
 
 def split_episode_ids(count: int, fraction: float, seed: int) -> tuple[list[int], list[int]]:
@@ -483,8 +498,7 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
             train_anchors, int(cfg.training.batch_size), int(cfg.training.seed),
             start_step, last_step,
         ),
-        num_workers=int(cfg.training.num_workers),
-        pin_memory=device.type == "cuda",
+        **_train_loader_options(cfg, device),
         generator=torch.Generator().manual_seed(int(cfg.training.seed)),
     )
     val_loader = DataLoader(
@@ -495,6 +509,11 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
     )
     print(f"[BC] episodes={episodes} train/val={len(train_ids)}/{len(val_ids)} "
           f"windows={len(train_anchors)}/{len(val_anchors)}")
+    loader_settings = _train_loader_options(cfg, device)
+    print(f"[BC] train_loader workers={loader_settings['num_workers']} "
+          f"prefetch_factor={loader_settings['prefetch_factor']} "
+          f"persistent_workers={loader_settings['persistent_workers']} "
+          f"pin_memory={loader_settings['pin_memory']}")
     cap_steps, cap_epochs = training_limits(cfg)
     print(f"[BC] budget: steps={cap_steps}, epochs={cap_epochs}, "
           f"steps_per_epoch={steps_per_epoch}, effective_total_steps={total_steps}")

@@ -76,6 +76,25 @@ decode or first-batch time.
   validation is 1,791 batches; measuring its cost is a separate task.
 - Native checkpoint / export and deployment remain unaffected.
 
+## LeTools Diffusion training DataLoader settings (next change)
+
+The native RL100 BC **training** loader now matches the pinned LeRobot
+`lerobot_train.py` worker options: `num_workers: 4`, CUDA `pin_memory`,
+`prefetch_factor: 4`, and `persistent_workers: true`. Values are exposed
+under `training` in `configs/train/rl100_dp_2d.yaml`, and effective options
+are printed at startup. For `num_workers: 0`, prefetch is disabled and workers
+are nonpersistent (required by PyTorch). The held-out validation loader is
+unchanged to avoid additional idle workers and out-of-scope validation edits.
+
+Important: this is a **configuration parity experiment**, not a demonstrated
+throughput fix. The same PyAV random-seek decoding and ~3-camera load remain.
+Four workers × four prefetched batches may increase RAM and /dev/shm use,
+particularly at batch_size=16 and large RGB frames. Check `df -h /dev/shm`,
+container CPU quota, `data_s`, `updt_s`, OOM events and throughput before
+a long run. If /dev/shm is restricted or workers are CPU-saturated, extra
+prefetch may not help and can cause bus errors. Keep the current model
+and validation/checkpoint selection behavior unchanged.
+
 ## Acceptance tests
 
 - Same action-window indices, left/right/head RGB ordering and shapes

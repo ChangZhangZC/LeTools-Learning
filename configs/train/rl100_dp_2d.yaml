@@ -28,6 +28,8 @@ training:
   # At least one cap must be a positive integer. Validation windows do not count.
   batch_size: 8
   num_workers: 4
+  prefetch_factor: 4      # LeTools Diffusion: batches queued per worker (more RAM/SHM)
+  persistent_workers: true  # LeTools Diffusion: keep workers alive across iterator use
   lr: 0.0001
   weight_decay: 0.000001
   lr_scheduler: "cosine"
