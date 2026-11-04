@@ -22,7 +22,10 @@ policy:
 training:
   device: "cuda:0"
   seed: 42
-  steps: 100000           # illustrative budget; set for final dataset and GPU
+  steps: 100000           # optimizer-step cap; null disables this cap
+  epochs: null            # complete training-data passes; null disables this cap
+  # Both set => stop at min(steps, epochs * ceil(train_windows / batch_size)).
+  # At least one cap must be a positive integer. Validation windows do not count.
   batch_size: 8
   num_workers: 4
   lr: 0.0001
