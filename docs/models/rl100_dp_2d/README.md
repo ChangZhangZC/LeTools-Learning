@@ -137,32 +137,53 @@ Training and future RL post-training keep the **original torch.save .pt
 checkpoint schema** (latest.pt, best.pt). Do not rename .pt to .safetensors
 or replace native actor/optimizer/EMA checkpoint logic.
 
-A separate inference-only export produces:
+A separate inference-only export keeps the original actor (including its
+normalizer) in a named leaf directory. The path follows LeTools' task/method/
+run/checkpoints convention, but RL100 is **not** a LeRobot PreTrainedPolicy.
 
-    outputs/export/rl100_dp_2d_my_run/
-      model.safetensors         # actor state_dict including trained normalizers
-      rl100_manifest.json       # native RL100 model spec, camera map, joint names
+    outputs/export/<task>/rl100_dp_2d_bc/<run>/checkpoints/
+      best_step_00001000/pretrained_model/
+        model.safetensors       # native RL100 actor, including normalization
+        rl100_manifest.json     # native RL100 config, source and data contract
+      step_00005000/pretrained_model/
+        model.safetensors
+        rl100_manifest.json
 
-This is **not** an ordinary LeRobot pretrained checkpoint. Its manifest is
-intentionally not called config.json because the native RL1002D actor is
-not a registered LeRobot PreTrainedPolicy. Native Eval uses a small direct
-loader, the original RL1002D factory, and LeTools' existing sim_auto_test.
+There are intentionally **no invented LeRobot pre/postprocessor JSON files**:
+the RL100 actor state_dict retains native input/action normalizers, and
+RL100DP2DEvalPolicy adapts RGB images, robot state and chunk timing in
+Python. Do not apply LeRobot normalizers again on top of this model.
 
-1. Export an actor from a native BC best.pt:
+1. Convert one or more checkpoints from the **same** training run:
+
+       python -m kuavo_model.rl100_dp_2d.export_safetensors \
+         --checkpoint \
+           outputs/train/rl100_dp_2d_RUN/checkpoints/best.pt \
+           outputs/train/rl100_dp_2d_RUN/checkpoints/step_00005000.pt \
+         --task icra_task1 \
+         --method rl100_dp_2d_bc
+
+   The default root is outputs/export; --run-name overrides the derived
+   training-run folder. Each source receives its own checkpoint subfolder,
+   never overwriting other exported actors. A checkpoint label of 'best' or
+   'latest' incorporates the step recorded inside the .pt file.
+
+   Existing one-checkpoint calls using --output-dir remain supported:
 
        python -m kuavo_model.rl100_dp_2d.export_safetensors \
          --checkpoint outputs/train/rl100_dp_2d_RUN/checkpoints/best.pt \
-         --output-dir outputs/export/rl100_dp_2d_RUN
+         --output-dir outputs/export/rl100_dp_2d_legacy
 
-   To export EMA weights from latest.pt, set --actor-key ema_model.
-   For a future RL post-training checkpoint whose actor state_dict is
-   under 'model' but lacks BC-style metadata, use --metadata-from pointing
-   to a compatible BC best.pt. The original training checkpoint is
-   never modified, and critic/dynamics/optimizer parameters are not exported.
-   A post-RL actor whose architecture or normalizer contract differs
-   requires an explicit new compatible loader rather than silent conversion.
+   To export EMA weights from a saved training step snapshot or latest.pt,
+   set --actor-key ema_model. A BC best.pt already stores whichever
+   actor the held-out validation selected, often EMA, under 'model';
+   do not use --actor-key ema_model on best.pt.
+   For a post-RL .pt missing BC-style metadata, --metadata-from supplies
+   a compatible BC best.pt. Original training .pt files are not altered,
+   and optimizer, critic and dynamics states are not exported. Actors
+   with incompatible normalizers/architecture need a separate loader.
 
-2. Copy and edit configs/deploy/rl100_dp_2d_eval.yaml:
+2. Set configs/deploy/rl100_dp_2d_eval.yaml to one exact bundle leaf:
 
        env:
          inference_env: sim
@@ -173,13 +194,18 @@ loader, the original RL1002D factory, and LeTools' existing sim_auto_test.
 
        inference:
          policy_type: rl100_dp_2d
-         pretrained_path: outputs/export/rl100_dp_2d_RUN
+         pretrained_path: outputs/export/icra_task1/rl100_dp_2d_bc/rl100_dp_2d_RUN/checkpoints/best_step_00001000/pretrained_model
          device: cuda
          n_action_steps: 16
          rl100_resize_images: false
          eval_episodes: 1
          async_inference: false
 
+   Eval results for these bundles are separately stored at:
+   outputs/eval/<task>/<method>/<run>/<checkpoint>/, avoiding collisions
+   between different best/step exports. Legacy flat exports retain
+   outputs/eval/<bundle-name>/.
+   
    Match platform, end-effector type, dimensions, control units, joint
    order, camera names and RGB dimensions to the source BC dataset.
    Explicit resizing is offered only for RGB shape; it cannot repair

@@ -19,6 +19,20 @@ from .export_safetensors import MANIFEST, WEIGHTS
 from .policy_factory import build_policy
 
 
+def resolve_rl100_eval_output_dir(pretrained_path: str | Path,
+                                  output_root: str | Path = "outputs/eval") -> Path:
+    """Separate results per exported checkpoint without changing legacy flat bundles."""
+    source = Path(pretrained_path).expanduser().resolve()
+    root = Path(output_root).expanduser().resolve()
+    if source.name == "pretrained_model" and source.parent.parent.name == "checkpoints":
+        checkpoint = source.parent
+        run = checkpoint.parent.parent
+        method = run.parent
+        task = method.parent
+        return root / task.name / method.name / run.name / checkpoint.name
+    return root / source.name
+
+
 class RL100DP2DEvalPolicy:
     def __init__(self, pretrained_path: str | Path, *,
                  device: str | torch.device = "cuda",

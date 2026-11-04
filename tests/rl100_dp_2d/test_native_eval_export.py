@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-from kuavo_model.rl100_dp_2d.export_safetensors import export_checkpoint
-from kuavo_model.rl100_dp_2d.eval_policy import RL100DP2DEvalPolicy
+from kuavo_model.rl100_dp_2d.export_safetensors import export_checkpoint, export_run_checkpoints
+from kuavo_model.rl100_dp_2d.eval_policy import RL100DP2DEvalPolicy, resolve_rl100_eval_output_dir
 
 
 class TinyActor(torch.nn.Module):
@@ -145,6 +145,69 @@ class NativeEvalExportTests(unittest.TestCase):
                     "observation.images.head_cam_h": torch.zeros(
                         (1, 3, 6, 6), dtype=torch.uint8),
                 })
+
+
+    def test_named_batch_export_preserves_original_sources_and_separates_checkpoints(self):
+        from safetensors.torch import load_file
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ckpts = root / "training_run_123" / "checkpoints"
+            ckpts.mkdir(parents=True)
+            best = ckpts / "best.pt"
+            step = ckpts / "step_00005000.pt"
+            best_payload = sample_payload()
+            step_payload = sample_payload()
+            step_payload["step"] = 5000
+            torch.save(best_payload, best)
+            torch.save(step_payload, step)
+            exported = export_run_checkpoints(
+                [best, step], output_root=root / "export", task="icra_task1",
+                method="rl100_dp_2d_bc",
+            )
+            base = root / "export" / "icra_task1" / "rl100_dp_2d_bc" / "training_run_123" / "checkpoints"
+            self.assertEqual(exported, [
+                base / "best_step_00000009" / "pretrained_model",
+                base / "step_00005000" / "pretrained_model",
+            ])
+            for source, bundle in zip((best, step), exported):
+                self.assertTrue(source.is_file())
+                self.assertTrue((bundle / "model.safetensors").is_file())
+                meta = json.loads((bundle / "rl100_manifest.json").read_text())
+                self.assertEqual(meta["source_filename"], source.name)
+                self.assertEqual(meta["source_run"], "training_run_123")
+                self.assertEqual(meta["format"], "letools_rl100_dp_2d")
+                self.assertIn("normalizer.params_dict.action.scale",
+                              load_file(str(bundle / "model.safetensors")))
+            # Strict no-overwrite behavior protects previously exported runs.
+            with self.assertRaises(FileExistsError):
+                export_run_checkpoints([best, step], output_root=root / "export",
+                                       task="icra_task1")
+
+    def test_named_batch_export_preflights_duplicate_destinations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            best = root / "best.pt"
+            torch.save(sample_payload(), best)
+            with self.assertRaisesRegex(ValueError, "same export directory"):
+                export_run_checkpoints([best, best], output_root=root / "export",
+                                       task="task")
+            self.assertFalse((root / "export").exists())
+            with self.assertRaisesRegex(ValueError, "Invalid task"):
+                export_run_checkpoints([best], output_root=root / "export",
+                                       task="../escape")
+
+    def test_native_eval_output_is_separated_by_checkpoint_and_supports_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = root / "export/task/rl100_dp_2d_bc/run_123/checkpoints/best/pretrained_model"
+            two = root / "export/task/rl100_dp_2d_bc/run_123/checkpoints/step_00005000/pretrained_model"
+            expected = root / "eval/task/rl100_dp_2d_bc/run_123"
+            self.assertEqual(resolve_rl100_eval_output_dir(one, root / "eval"),
+                             expected / "best")
+            self.assertEqual(resolve_rl100_eval_output_dir(two, root / "eval"),
+                             expected / "step_00005000")
+            self.assertEqual(resolve_rl100_eval_output_dir(root / "flat_bundle", root / "eval"),
+                             root / "eval/flat_bundle")
 
 
 if __name__ == "__main__":
