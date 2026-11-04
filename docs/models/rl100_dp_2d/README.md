@@ -91,8 +91,15 @@ best.pt contains the validated actor for inference, not resume.
 ## Logging
 
 Always enabled: console, metrics.jsonl, resolved_config.yaml.
-JSONL: train loss, LR, equivalent epoch, elapsed time; held-out
-validation denoising loss (selected EMA/raw).
+Console uses LeRobot AverageMeter/MetricsTracker plus tqdm: aggregated
+loss, grad norm (when clipping enabled), LR, data_s and updt_s, along
+with step/epoch progress, speed, wall-clock time and estimated ETA.
+JSONL retains train loss, LR, equivalent epoch and elapsed time and adds
+data_s, update_s, speed and ETA; validation loss and duration remain
+recorded. Video frames use LeRobot uint8 transport and are converted
+to float32 [0,1] at the native RL100 model batch boundary, without
+changing actor-owned state/action normalization or image transforms.
+See pipeline_review.md for the interface boundary and deferred work.
 
 Optional YAML sections:
 
