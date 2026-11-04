@@ -315,7 +315,7 @@ class ProductionBCUnitTests(unittest.TestCase):
             with (
                 patch.object(prod, "train") as runner,
                 patch.object(sys, "argv", [
-                    "train_bc_production.py", "--config", str(config_path),
+                    "train.py", "--config", str(config_path),
                     "--resume", "--output-dir", str(exact),
                 ]),
             ):
@@ -326,7 +326,7 @@ class ProductionBCUnitTests(unittest.TestCase):
             with (
                 patch.object(prod, "train") as runner,
                 patch.object(sys, "argv", [
-                    "train_bc_production.py", "--config", str(config_path),
+                    "train.py", "--config", str(config_path),
                     "--no-timestamp",
                 ]),
             ):
