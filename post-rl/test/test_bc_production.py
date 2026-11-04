@@ -6,6 +6,7 @@ import io
 import random
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -242,6 +243,46 @@ class ProductionBCUnitTests(unittest.TestCase):
             # Both train and held-out datasets must remain disjoint on resume.
             self.assertFalse(set(best["split"]["train"]) & set(best["split"]["val"]))
 
+
+    def test_optional_wandb_init_cannot_perturb_training_rng(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with_wb = config_for_test(root / "with_logging")
+            without_wb = config_for_test(root / "without_logging")
+            with_wb.wandb = {
+                "enable": True, "project": "test-project",
+                "entity": None, "mode": "offline",
+            }
+
+            class FakeRun:
+                id = "test-run-123"
+                def define_metric(self, *args, **kwargs):
+                    pass
+                def log(self, values):
+                    pass
+                def finish(self):
+                    pass
+
+            wandb = types.ModuleType("wandb")
+            def init_wandb(**kwargs):
+                random.seed(123456)
+                np.random.seed(123456)
+                torch.manual_seed(123456)
+                return FakeRun()
+            wandb.init = init_wandb
+            with (
+                patch.dict(sys.modules, {"wandb": wandb}),
+                patch.object(prod, "open_lerobot_bc_dataset", return_value=FakeView()),
+                patch.object(prod, "build_policy", side_effect=lambda cfg, contract: TinyActor()),
+            ):
+                prod.train(with_wb)
+                prod.train(without_wb)
+            one = torch.load(root / "with_logging/checkpoints/latest.pt", weights_only=True)
+            two = torch.load(root / "without_logging/checkpoints/latest.pt", weights_only=True)
+            for key in one["model"]:
+                self.assertTrue(torch.equal(one["model"][key], two["model"][key]), key)
+            for key in one["ema_model"]:
+                self.assertTrue(torch.equal(one["ema_model"][key], two["ema_model"][key]), key)
 
     def test_cli_timestamp_matches_lerobot_and_resume_preserves_path(self):
         import re
