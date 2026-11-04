@@ -11,8 +11,9 @@ env:
 
 inference:
   policy_type: rl100_dp_2d
-  # Directory containing model.safetensors + rl100_manifest.json (not a .pt).
-  pretrained_path: "outputs/export/rl100_dp_2d_example"
+  # Leaf directory containing model.safetensors + rl100_manifest.json (not a .pt).
+  # Replace task, run name and best step with those printed by the exporter.
+  pretrained_path: "outputs/export/icra_task1/rl100_dp_2d_bc/rl100_dp_2d_RUN/checkpoints/best_step_00001000/pretrained_model"
   device: cuda
   eval_episodes: 1
   max_episode_steps: 100
