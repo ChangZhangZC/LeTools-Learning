@@ -507,69 +507,112 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
     finally:
         restore_rng_state(logger_rng)
+    print(f"[BC] setup={timedelta(seconds=int(time.monotonic() - setup_start))}; "
+          "starting DataLoader (first video batch may be slower)")
     try:
         model.train()
         start_time = time.monotonic()
-        for step, sample in enumerate(train_loader, start=start_step + 1):
-            assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
-            batch = _to_device(sample, device)
-            optimizer.zero_grad(set_to_none=True)
-            loss, details = model.compute_loss(batch)
-            if loss.ndim != 0 or not torch.isfinite(loss).item():
-                raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
-            loss.backward()
-            grad_limit = float(cfg.training.max_grad_norm)
-            if grad_limit:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
-            optimizer.step()
-            scheduler.step()
-            if ema is not None:
-                ema.step(model)
-                _sync_ema_buffers(ema, model)
+        previous_step_end = start_time
+        data_sum = update_sum = 0.0
+        interval_steps = 0
+        total_epochs = total_steps / steps_per_epoch
+        with tqdm(total=last_step - start_step, desc="RL100 BC", unit="step",
+                  dynamic_ncols=True, disable=not sys.stderr.isatty()) as progress:
+            for step, sample in enumerate(train_loader, start=start_step + 1):
+                batch_ready = time.monotonic()
+                data_sum += batch_ready - previous_step_end
+                assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
+                batch = _to_device(sample, device)
+                optimizer.zero_grad(set_to_none=True)
+                loss, details = model.compute_loss(batch)
+                if loss.ndim != 0 or not torch.isfinite(loss).item():
+                    raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
+                loss.backward()
+                grad_limit = float(cfg.training.max_grad_norm)
+                if grad_limit:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
+                optimizer.step()
+                scheduler.step()
+                if ema is not None:
+                    ema.step(model)
+                    _sync_ema_buffers(ema, model)
+                update_sum += time.monotonic() - batch_ready
+                interval_steps += 1
+                progress.update(1)
 
-            if step % int(cfg.training.log_every) == 0 or step == last_step:
-                lr = optimizer.param_groups[0]["lr"]
-                epoch_progress = step / steps_per_epoch
-                _write_metric(paths["metrics"], phase="train", step=step,
-                              epoch_equivalent=round(epoch_progress, 6),
-                              loss=float(loss.item()), lr=float(lr),
-                              elapsed_s=round(time.monotonic() - start_time, 3))
-                metric_logger.train(step=step, loss=float(loss.item()),
-                                    lr=float(lr), epoch=float(epoch_progress))
-                print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
+                if step % int(cfg.training.log_every) == 0 or step == last_step:
+                    lr = optimizer.param_groups[0]["lr"]
+                    epoch_progress = step / steps_per_epoch
+                    elapsed = time.monotonic() - start_time
+                    speed = (step - start_step) / elapsed if elapsed > 0 else 0.0
+                    eta_s = (last_step - step) / speed if speed > 0 else 0.0
+                    data_s = data_sum / interval_steps
+                    update_s = update_sum / interval_steps
+                    _write_metric(paths["metrics"], phase="train", step=step,
+                                  epoch_equivalent=round(epoch_progress, 6),
+                                  loss=float(loss.item()), lr=float(lr),
+                                  elapsed_s=round(elapsed, 3),
+                                  data_s=round(data_s, 4),
+                                  update_s=round(update_s, 4),
+                                  steps_per_s=round(speed, 4),
+                                  eta_s=round(eta_s, 1))
+                    metric_logger.train(step=step, loss=float(loss.item()),
+                                        lr=float(lr), epoch=float(epoch_progress))
+                    progress.set_postfix(loss=f"{loss.item():.4f}", lr=f"{lr:.1e}",
+                                         epoch=f"{epoch_progress:.2f}", data_s=f"{data_s:.2f}",
+                                         updt_s=f"{update_s:.2f}", refresh=False)
+                    tqdm.write(
+                        f"[BC] {datetime.now():%H:%M:%S} "
+                        f"epoch={epoch_progress:.2f}/{total_epochs:.2f} "
+                        f"step={step}/{total_steps} ({step / total_steps:.1%}) "
+                        f"loss={loss.item():.6f} lr={lr:.2e} "
+                        f"data_s={data_s:.3f} updt_s={update_s:.3f} "
+                        f"speed={speed:.2f}step/s "
+                        f"elapsed={timedelta(seconds=int(elapsed))} "
+                        f"ETA~{timedelta(seconds=int(eta_s))}"
+                    )
+                    data_sum = update_sum = 0.0
+                    interval_steps = 0
 
-            if step % int(cfg.training.val_every) == 0 or step == total_steps:
-                selected = ema.averaged_model if ema is not None else model
-                val_loss = evaluate(
-                    selected, val_loader, int(cfg.data.n_obs_steps),
-                    device, int(cfg.validation.seed),
-                    int(cfg.validation.max_batches),
-                )
-                _write_metric(paths["metrics"], phase="val", step=step,
-                              loss=float(val_loss),
-                              weights="ema" if ema is not None else "raw")
-                print(f"[VAL] step={step} loss={val_loss:.6f}")
-                if best_loss is None or val_loss < best_loss:
-                    best_loss, best_step = float(val_loss), step
-                    _save_checkpoint(paths["best"], _make_best_payload(
-                        cfg, view, selected, step, split, best_loss,
-                        "ema" if ema is not None else "raw",
-                    ))
-                    print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
-                metric_logger.validation(step=step, loss=float(val_loss),
-                                         best_loss=float(best_loss))
+                if step % int(cfg.training.val_every) == 0 or step == total_steps:
+                    selected = ema.averaged_model if ema is not None else model
+                    max_val_batches = int(cfg.validation.max_batches)
+                    n_val_batches = min(len(val_loader), max_val_batches) if max_val_batches else len(val_loader)
+                    tqdm.write(f"[VAL] step={step} starting {n_val_batches} batches")
+                    val_start = time.monotonic()
+                    val_loss = evaluate(
+                        selected, val_loader, int(cfg.data.n_obs_steps),
+                        device, int(cfg.validation.seed),
+                        max_val_batches, show_progress=True,
+                    )
+                    val_s = time.monotonic() - val_start
+                    _write_metric(paths["metrics"], phase="val", step=step,
+                                  loss=float(val_loss), elapsed_s=round(val_s, 3),
+                                  weights="ema" if ema is not None else "raw")
+                    tqdm.write(f"[VAL] step={step} loss={val_loss:.6f} "
+                               f"elapsed={timedelta(seconds=int(val_s))}")
+                    if best_loss is None or val_loss < best_loss:
+                        best_loss, best_step = float(val_loss), step
+                        _save_checkpoint(paths["best"], _make_best_payload(
+                            cfg, view, selected, step, split, best_loss,
+                            "ema" if ema is not None else "raw",
+                        ))
+                        tqdm.write(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+                    metric_logger.validation(step=step, loss=float(val_loss),
+                                              best_loss=float(best_loss))
 
-            if step % int(cfg.training.save_every) == 0 or step == last_step:
-                latest = _make_resume_payload(
-                    cfg, view, model, optimizer, scheduler, ema,
-                    step, split, best_loss, best_step,
-                )
-                latest["effective_total_steps"] = total_steps
-                _save_checkpoint(paths["latest"], latest)
-                if bool(cfg.training.keep_step_checkpoints):
-                    snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
-                    _save_checkpoint(snapshot, latest)
-                print(f"[PASS] training checkpoint: step={step}")
+                if step % int(cfg.training.save_every) == 0 or step == last_step:
+                    latest = _make_resume_payload(
+                        cfg, view, model, optimizer, scheduler, ema,
+                        step, split, best_loss, best_step,
+                    )
+                    latest["effective_total_steps"] = total_steps
+                    _save_checkpoint(paths["latest"], latest)
+                    if bool(cfg.training.keep_step_checkpoints):
+                        snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
+                        _save_checkpoint(snapshot, latest)
+                    tqdm.write(f"[PASS] training checkpoint: step={step}")
+                previous_step_end = time.monotonic()
         if start_step >= last_step:
             print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
     finally:
