@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "third_party" / "rl100" / "RL-100"))
 
+from kuavo_model.rl100_dp_2d.bc_utils import _to_device  # noqa: E402
 from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
 from kuavo_model.rl100_dp_2d.policy_factory import build_policy  # noqa: E402
 
@@ -86,9 +87,14 @@ def main() -> None:
         raise AssertionError("Dataset action joint order differs from checkpoint")
 
     sample = dataset[0]
-    obs = {key: tensor.unsqueeze(0).to(args.device) for key, tensor in sample["obs"].items()}
+    # Dataset now keeps RGB uint8 through DataLoader; use the same native
+    # boundary adapter as training to supply float32 RGB in [0, 1].
+    prepared = _to_device({
+        "obs": {key: tensor.unsqueeze(0) for key, tensor in sample["obs"].items()},
+        "action": sample["action"].unsqueeze(0),
+    }, torch.device(args.device))
     with torch.inference_mode():
-        out = model.predict_action(obs, deterministic=True)
+        out = model.predict_action(prepared["obs"], deterministic=True)
     actions = out["action"]
     expected_shape = (1, int(cfg.data.n_action_steps), action_dim)
     if tuple(actions.shape) != expected_shape or not torch.isfinite(actions).all().item():

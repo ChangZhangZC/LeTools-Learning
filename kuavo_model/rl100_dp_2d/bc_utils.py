@@ -77,9 +77,26 @@ def build_normalizer(dataset) -> LinearNormalizer:
 
 
 def _to_device(sample, device):
+    """LeRobot uint8 transport -> native RL100 float32 input, no extra normalization.
+
+    Only RGB is cast/scaled here. The original RL100 actor continues to own
+    state/action normalization and resize/ImageNet transforms inside its encoder.
+    This adapter is shared by training and validation.
+    """
+    obs = {}
+    for key, tensor in sample["obs"].items():
+        if key.startswith("rgb_"):
+            if tensor.dtype == torch.uint8:
+                obs[key] = tensor.to(device=device, dtype=torch.float32, non_blocking=True) / 255.0
+            elif tensor.is_floating_point():
+                # Also accept already normalized image tensors in [0, 1] as before.
+                obs[key] = tensor.to(device, dtype=torch.float32, non_blocking=True)
+            else:
+                raise TypeError(f"{key}: unsupported RGB dtype {tensor.dtype}")
+        else:
+            obs[key] = tensor.to(device, non_blocking=True)
     return {
-        "obs": {key: tensor.to(device, non_blocking=True)
-                for key, tensor in sample["obs"].items()},
+        "obs": obs,
         "action": sample["action"].to(device, non_blocking=True),
     }
 

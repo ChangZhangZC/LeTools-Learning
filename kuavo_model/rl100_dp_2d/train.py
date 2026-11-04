@@ -13,13 +13,14 @@ import math
 import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 ROOT = Path(__file__).resolve().parents[2]
 for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
@@ -27,6 +28,7 @@ for directory in (ROOT, ROOT / "third_party" / "lerobot" / "src",
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
+from lerobot.utils.logging_utils import AverageMeter, MetricsTracker  # noqa: E402
 from kuavo_model.rl100_dp_2d.dataset import open_lerobot_bc_dataset  # noqa: E402
 from kuavo_model.rl100_dp_2d.metrics import BCMetricLogger  # noqa: E402
 from kuavo_model.rl100_dp_2d.bc_utils import (  # noqa: E402
@@ -294,26 +296,32 @@ def _sync_ema_buffers(ema: EMAModel, model: torch.nn.Module) -> None:
 
 
 def evaluate(model: torch.nn.Module, loader: DataLoader, obs_steps: int,
-             device: torch.device, seed: int, max_batches: int) -> float:
+             device: torch.device, seed: int, max_batches: int,
+             show_progress: bool = False) -> float:
     """Fixed diffusion-noise seed makes validation loss comparisons meaningful."""
     saved_rng = capture_rng_state()
     previous_mode = model.training
     total = 0.0
     count = 0
+    val_batches = min(len(loader), max_batches) if max_batches else len(loader)
     try:
         _seed_all(seed)
         model.eval()
-        with torch.no_grad():
-            for batch_idx, sample in enumerate(loader):
-                if max_batches and batch_idx >= max_batches:
-                    break
-                assert_valid_action_targets(sample, obs_steps)
-                loss, _ = model.compute_loss(_to_device(sample, device))
-                if loss.ndim != 0 or not torch.isfinite(loss).item():
-                    raise FloatingPointError(f"Invalid validation loss: {loss}")
-                bs = sample["action"].shape[0]
-                total += loss.item() * bs
-                count += bs
+        with tqdm(total=val_batches, desc="Validation", unit="batch",
+                  dynamic_ncols=True, leave=False,
+                  disable=not show_progress or not sys.stderr.isatty()) as progress:
+            with torch.no_grad():
+                for batch_idx, sample in enumerate(loader):
+                    if max_batches and batch_idx >= max_batches:
+                        break
+                    assert_valid_action_targets(sample, obs_steps)
+                    loss, _ = model.compute_loss(_to_device(sample, device))
+                    if loss.ndim != 0 or not torch.isfinite(loss).item():
+                        raise FloatingPointError(f"Invalid validation loss: {loss}")
+                    bs = sample["action"].shape[0]
+                    total += loss.item() * bs
+                    count += bs
+                    progress.update(1)
     finally:
         model.train(previous_mode)
         restore_rng_state(saved_rng)
@@ -364,6 +372,7 @@ def _make_best_payload(cfg, view, selected_model, step: int, split: dict,
 
 def train(cfg, *, stop_after: int | None = None) -> Path:
     check_config(cfg)
+    setup_start = time.monotonic()
     device = torch.device(str(cfg.training.device))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but unavailable")
@@ -484,8 +493,8 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         pin_memory=device.type == "cuda",
         generator=torch.Generator().manual_seed(int(cfg.validation.seed)),
     )
-    print(f"[BC] episodes={episodes} train={train_ids} val={val_ids}; "
-          f"anchors={len(train_anchors)}/{len(val_anchors)}")
+    print(f"[BC] episodes={episodes} train/val={len(train_ids)}/{len(val_ids)} "
+          f"windows={len(train_anchors)}/{len(val_anchors)}")
     cap_steps, cap_epochs = training_limits(cfg)
     print(f"[BC] budget: steps={cap_steps}, epochs={cap_epochs}, "
           f"steps_per_epoch={steps_per_epoch}, effective_total_steps={total_steps}")
@@ -499,69 +508,144 @@ def train(cfg, *, stop_after: int | None = None) -> Path:
         metric_logger = BCMetricLogger(cfg, output, resumed=resume, resume_step=start_step)
     finally:
         restore_rng_state(logger_rng)
+    print(f"[BC] setup={timedelta(seconds=int(time.monotonic() - setup_start))}; "
+          "starting DataLoader (first video batch may be slower)")
+    # LeTools Diffusion's AverageMeter/MetricsTracker display is reused here;
+    # RL100 update_policy/optimizer/EMA and checkpoint logic remain native.
+    display_metrics = {
+        "loss": AverageMeter("loss", ":.3f"),
+        "lr": AverageMeter("lr", ":0.1e"),
+        "update_s": AverageMeter("updt_s", ":.3f"),
+        "dataloading_s": AverageMeter("data_s", ":.3f"),
+    }
+    if float(cfg.training.max_grad_norm) > 0:
+        display_metrics["grad_norm"] = AverageMeter("grdn", ":.3f")
+    train_tracker = MetricsTracker(
+        int(cfg.training.batch_size), len(train_anchors), len(train_ids),
+        display_metrics, initial_step=start_step,
+    )
     try:
         model.train()
         start_time = time.monotonic()
-        for step, sample in enumerate(train_loader, start=start_step + 1):
-            assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
-            batch = _to_device(sample, device)
-            optimizer.zero_grad(set_to_none=True)
-            loss, details = model.compute_loss(batch)
-            if loss.ndim != 0 or not torch.isfinite(loss).item():
-                raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
-            loss.backward()
-            grad_limit = float(cfg.training.max_grad_norm)
-            if grad_limit:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_limit, error_if_nonfinite=True)
-            optimizer.step()
-            scheduler.step()
-            if ema is not None:
-                ema.step(model)
-                _sync_ema_buffers(ema, model)
-
-            if step % int(cfg.training.log_every) == 0 or step == last_step:
-                lr = optimizer.param_groups[0]["lr"]
-                epoch_progress = step / steps_per_epoch
-                _write_metric(paths["metrics"], phase="train", step=step,
-                              epoch_equivalent=round(epoch_progress, 6),
-                              loss=float(loss.item()), lr=float(lr),
-                              elapsed_s=round(time.monotonic() - start_time, 3))
-                metric_logger.train(step=step, loss=float(loss.item()),
-                                    lr=float(lr), epoch=float(epoch_progress))
-                print(f"[BC] step={step}/{total_steps} loss={loss.item():.6f} lr={lr:.3g}")
-
-            if step % int(cfg.training.val_every) == 0 or step == total_steps:
-                selected = ema.averaged_model if ema is not None else model
-                val_loss = evaluate(
-                    selected, val_loader, int(cfg.data.n_obs_steps),
-                    device, int(cfg.validation.seed),
-                    int(cfg.validation.max_batches),
+        previous_step_end = start_time
+        data_sum = update_sum = 0.0
+        interval_steps = 0
+        with tqdm(total=last_step - start_step, desc="RL100 BC", unit="step",
+                  dynamic_ncols=True, disable=not sys.stderr.isatty()) as progress:
+            for step, sample in enumerate(train_loader, start=start_step + 1):
+                assert_valid_action_targets(sample, int(cfg.data.n_obs_steps))
+                batch = _to_device(sample, device)
+                update_start = time.monotonic()
+                data_s_step = update_start - previous_step_end
+                data_sum += data_s_step
+                optimizer.zero_grad(set_to_none=True)
+                loss, details = model.compute_loss(batch)
+                if loss.ndim != 0 or not torch.isfinite(loss).item():
+                    raise FloatingPointError(f"Invalid BC loss at step={step}: {loss}")
+                loss.backward()
+                grad_limit = float(cfg.training.max_grad_norm)
+                if grad_limit:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), grad_limit, error_if_nonfinite=True
+                    )
+                optimizer.step()
+                scheduler.step()
+                if ema is not None:
+                    ema.step(model)
+                    _sync_ema_buffers(ema, model)
+                update_s_step = time.monotonic() - update_start
+                update_sum += update_s_step
+                interval_steps += 1
+                train_tracker.step()
+                # MetricsTracker assumes fixed-size batches; adjust counters for
+                # our sampler's last partial batch in each exact training epoch.
+                done_epochs, partial_steps = divmod(step, steps_per_epoch)
+                seen = done_epochs * len(train_anchors) + min(
+                    partial_steps * int(cfg.training.batch_size), len(train_anchors)
                 )
-                _write_metric(paths["metrics"], phase="val", step=step,
-                              loss=float(val_loss),
-                              weights="ema" if ema is not None else "raw")
-                print(f"[VAL] step={step} loss={val_loss:.6f}")
-                if best_loss is None or val_loss < best_loss:
-                    best_loss, best_step = float(val_loss), step
-                    _save_checkpoint(paths["best"], _make_best_payload(
-                        cfg, view, selected, step, split, best_loss,
-                        "ema" if ema is not None else "raw",
-                    ))
-                    print(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
-                metric_logger.validation(step=step, loss=float(val_loss),
-                                         best_loss=float(best_loss))
+                train_tracker.samples = seen
+                train_tracker.epochs = seen / len(train_anchors)
+                train_tracker.episodes = seen * len(train_ids) / len(train_anchors)
+                train_tracker.loss = float(loss.item())
+                train_tracker.lr = optimizer.param_groups[0]["lr"]
+                train_tracker.dataloading_s = data_s_step
+                train_tracker.update_s = update_s_step
+                if grad_limit:
+                    train_tracker.grad_norm = float(grad_norm.item())
+                progress.update(1)
 
-            if step % int(cfg.training.save_every) == 0 or step == last_step:
-                latest = _make_resume_payload(
-                    cfg, view, model, optimizer, scheduler, ema,
-                    step, split, best_loss, best_step,
-                )
-                latest["effective_total_steps"] = total_steps
-                _save_checkpoint(paths["latest"], latest)
-                if bool(cfg.training.keep_step_checkpoints):
-                    snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
-                    _save_checkpoint(snapshot, latest)
-                print(f"[PASS] training checkpoint: step={step}")
+                if step % int(cfg.training.log_every) == 0 or step == last_step:
+                    lr = optimizer.param_groups[0]["lr"]
+                    epoch_progress = step / steps_per_epoch
+                    elapsed = time.monotonic() - start_time
+                    speed = (step - start_step) / elapsed if elapsed > 0 else 0.0
+                    eta_s = (last_step - step) / speed if speed > 0 else 0.0
+                    data_s = data_sum / interval_steps
+                    update_s = update_sum / interval_steps
+                    _write_metric(paths["metrics"], phase="train", step=step,
+                                  epoch_equivalent=round(epoch_progress, 6),
+                                  loss=float(loss.item()), lr=float(lr),
+                                  elapsed_s=round(elapsed, 3),
+                                  data_s=round(data_s, 4),
+                                  update_s=round(update_s, 4),
+                                  steps_per_s=round(speed, 4),
+                                  eta_s=round(eta_s, 1))
+                    metric_logger.train(step=step, loss=float(loss.item()),
+                                        lr=float(lr), epoch=float(epoch_progress))
+                    progress.set_postfix(loss=f"{train_tracker.loss.avg:.3f}",
+                                         lr=f"{lr:.1e}", epch=f"{train_tracker.epochs:.2f}",
+                                         data_s=f"{data_s:.2f}", updt_s=f"{update_s:.2f}",
+                                         refresh=False)
+                    tqdm.write(
+                        f"[TRAIN] {datetime.now():%H:%M:%S} {train_tracker} "
+                        f"({step}/{total_steps}, {step / total_steps:.1%}) "
+                        f"speed:{speed:.2f}step/s "
+                        f"elapsed:{timedelta(seconds=int(elapsed))} "
+                        f"ETA~{timedelta(seconds=int(eta_s))}"
+                    )
+                    train_tracker.reset_averages()
+                    data_sum = update_sum = 0.0
+                    interval_steps = 0
+
+                if step % int(cfg.training.val_every) == 0 or step == total_steps:
+                    selected = ema.averaged_model if ema is not None else model
+                    max_val_batches = int(cfg.validation.max_batches)
+                    n_val_batches = min(len(val_loader), max_val_batches) if max_val_batches else len(val_loader)
+                    tqdm.write(f"[VAL] step={step} starting {n_val_batches} batches")
+                    val_start = time.monotonic()
+                    val_loss = evaluate(
+                        selected, val_loader, int(cfg.data.n_obs_steps),
+                        device, int(cfg.validation.seed),
+                        max_val_batches, show_progress=True,
+                    )
+                    val_s = time.monotonic() - val_start
+                    _write_metric(paths["metrics"], phase="val", step=step,
+                                  loss=float(val_loss), elapsed_s=round(val_s, 3),
+                                  weights="ema" if ema is not None else "raw")
+                    tqdm.write(f"[VAL] step={step} loss={val_loss:.6f} "
+                               f"elapsed={timedelta(seconds=int(val_s))}")
+                    if best_loss is None or val_loss < best_loss:
+                        best_loss, best_step = float(val_loss), step
+                        _save_checkpoint(paths["best"], _make_best_payload(
+                            cfg, view, selected, step, split, best_loss,
+                            "ema" if ema is not None else "raw",
+                        ))
+                        tqdm.write(f"[PASS] best deploy checkpoint: step={step}, val={best_loss:.6f}")
+                    metric_logger.validation(step=step, loss=float(val_loss),
+                                              best_loss=float(best_loss))
+
+                if step % int(cfg.training.save_every) == 0 or step == last_step:
+                    latest = _make_resume_payload(
+                        cfg, view, model, optimizer, scheduler, ema,
+                        step, split, best_loss, best_step,
+                    )
+                    latest["effective_total_steps"] = total_steps
+                    _save_checkpoint(paths["latest"], latest)
+                    if bool(cfg.training.keep_step_checkpoints):
+                        snapshot = output / "checkpoints" / f"step_{step:08d}.pt"
+                        _save_checkpoint(snapshot, latest)
+                    tqdm.write(f"[PASS] training checkpoint: step={step}")
+                previous_step_end = time.monotonic()
         if start_step >= last_step:
             print(f"[BC] Nothing to do: checkpoint already at step={start_step}")
     finally:

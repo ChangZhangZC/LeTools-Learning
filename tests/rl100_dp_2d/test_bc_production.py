@@ -225,6 +225,13 @@ class ProductionBCUnitTests(unittest.TestCase):
                 [item["epoch_equivalent"] for item in metrics
                  if item["phase"] == "train"][-1], 1.0,
             )
+            # Progress telemetry is additive and must not change resume results.
+            train_row = next(row for row in reversed(metrics) if row["phase"] == "train")
+            for key in ("data_s", "update_s", "steps_per_s", "eta_s", "elapsed_s"):
+                self.assertIn(key, train_row)
+                self.assertGreaterEqual(train_row[key], 0)
+            val_row = next(row for row in reversed(metrics) if row["phase"] == "val")
+            self.assertGreaterEqual(val_row["elapsed_s"], 0)
 
     def test_split_by_episode_never_by_frame(self):
         first = prod.split_episode_ids(10, .2, 42)
