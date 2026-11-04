@@ -61,6 +61,18 @@ def obs(step):
 
 
 class NativeEvalExportTests(unittest.TestCase):
+    def test_eval_yaml_uses_native_policy_and_runtime_chunk_length(self):
+        from kuavo_deploy.config import load_kuavo_config, ConfigInference
+
+        root = Path(__file__).resolve().parents[2]
+        profile = root / "configs/deploy/rl100_dp_2d_eval.yaml"
+        cfg = load_kuavo_config(str(profile))
+        self.assertEqual(cfg.env.inference_env, "sim")
+        self.assertEqual(cfg.inference.policy_type, "rl100_dp_2d")
+        self.assertEqual(cfg.inference.n_action_steps, 16)
+        with self.assertRaisesRegex(ValueError, "n_action_steps"):
+            ConfigInference(policy_type="rl100_dp_2d", n_action_steps=0).validate()
+
     def test_export_state_dict_roundtrip_and_original_checkpoint_intact(self):
         from safetensors.torch import load_file
         with tempfile.TemporaryDirectory() as tmp:
