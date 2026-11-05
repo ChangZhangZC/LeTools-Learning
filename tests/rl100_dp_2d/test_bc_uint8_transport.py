@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -15,6 +16,9 @@ from kuavo_model.rl100_dp_2d.dataset import RL100LeRobotDataset, contract_from_f
 
 
 class FakeSource:
+    def __init__(self):
+        self.reader = SimpleNamespace()
+
     features = {
         "observation.state": {"dtype": "float32", "shape": [2]},
         "action": {"dtype": "float32", "shape": [2]},
@@ -72,6 +76,11 @@ class Uint8TransportTests(unittest.TestCase):
                     self.assertEqual(len(view.contract.source_to_rgb), 2)
                     self.assertTrue(ctor.call_args.kwargs["return_uint8"])
                     self.assertEqual(ctor.call_args.kwargs["video_backend"], "pyav")
+                    from kuavo_model.rl100_dp_2d.rgb_only_reader import RGBOnlyDatasetReader
+                    self.assertIsInstance(view.dataset.reader, RGBOnlyDatasetReader)
+                    self.assertEqual(view.dataset.reader._rgb_video_keys,
+                                     frozenset(FakeSource.features.keys()) -
+                                     {"observation.state", "action"})
 
     def test_non_uint8_rgb_rejected_or_preserved_as_float(self):
         raw = FakeSource()
