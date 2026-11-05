@@ -26,6 +26,8 @@ class RGBOnlyReaderTests(unittest.TestCase):
         source._meta = SimpleNamespace(
             video_keys=[*depth_keys, *rgb_keys],
             tasks=SimpleNamespace(iloc=[SimpleNamespace(name="test_task")]),
+            features={},
+            subtasks=None,
         )
         source.delta_indices = None
         source._image_transforms = None
