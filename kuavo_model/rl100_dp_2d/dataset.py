@@ -212,6 +212,7 @@ def open_lerobot_bc_dataset(
         sys.path.insert(0, str(pinned_src))
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from kuavo_model.rl100_dp_2d.rgb_only_reader import RGBOnlyDatasetReader
 
     root = Path(root).expanduser().resolve()
     if not (root / "meta" / "info.json").is_file():
@@ -226,4 +227,7 @@ def open_lerobot_bc_dataset(
         delta_timestamps=delta_timestamps, video_backend=video_backend,
         return_uint8=True,
     )
+    # LeRobot's reader queries every video key, including unused depth streams.
+    # Keep LeRobot metadata and sampling intact; decode only Actor RGB cameras.
+    dataset.reader = RGBOnlyDatasetReader(dataset.reader, contract.source_to_rgb)
     return RL100LeRobotDataset(dataset, contract, n_obs_steps, horizon)
